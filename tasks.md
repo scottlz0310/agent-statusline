@@ -15,12 +15,12 @@
 - [x] `render` コマンドの実装と実行レイテンシ検証 (< 5ms 実測 4.2ms)
 
 ## Phase 2: クライアント設定自動化 (`install` / `uninstall` / `status`)
-- [ ] 各クライアントの設定ファイルパス解決 (`paths.rs`)
-- [ ] 設定ファイルの安全なパッチ機構の実装 (`patcher.rs`: バックアップ、既存設定保持)
-- [ ] `install` サブコマンドの実装 (`--agent`, `--all`, `--dry-run`)
-- [ ] `uninstall` サブコマンドの実装
-- [ ] `status` サブコマンドの実装 (各クライアントの登録状態・整合性検証)
-- [ ] 一時ディレクトリを用いたインストーラーの単体・結合テスト
+- [x] 各クライアントの設定ファイルパス解決 (`client.rs`: `AgentConfigTarget`)
+- [x] 設定ファイルの安全なパッチ機構の実装 (`patcher.rs`: バックアップ、既存設定保持、コメント保持、アトミック書き込み)
+- [x] `install` サブコマンドの実装 (`--agent`, `--all`, `--dry-run`)
+- [x] `uninstall` サブコマンドの実装 (`--agent`, `--all`, `--dry-run`)
+- [x] `status` サブコマンドの実装 (各クライアントの登録状態・整合性検証)
+- [x] 一時ディレクトリを用いたインストーラーの単体・結合テスト
 
 ## Phase 3: Starship ライクな TOML 設定エンジン (`config.toml`)
 - [ ] TOML 設定スキーマの実装 (`config.rs`)

@@ -53,6 +53,10 @@ pub enum Commands {
         /// Uninstall from all supported agents
         #[arg(long)]
         all: bool,
+
+        /// Display changes without modifying files
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Diagnose statusline installation status across all agents
@@ -68,11 +72,39 @@ pub enum Commands {
     },
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentKind {
     Agy,
     Claude,
     Copilot,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 3] = [Self::Agy, Self::Claude, Self::Copilot];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agy => "agy",
+            Self::Claude => "claude",
+            Self::Copilot => "copilot",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Agy => "Antigravity CLI (agy)",
+            Self::Claude => "Claude Code (claude)",
+            Self::Copilot => "GitHub Copilot CLI (copilot)",
+        }
+    }
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

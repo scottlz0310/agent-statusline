@@ -18,6 +18,9 @@ terminal_size = "0.4.4"
 toml_edit = "0.25.15"
 gix = { version = "0.87.1", default-features = false, features = ["status", "revision", "sha1"] }
 
+[dev-dependencies]
+tempfile = "3.27"
+
 [profile.release]
 opt-level = 3
 lto = true
