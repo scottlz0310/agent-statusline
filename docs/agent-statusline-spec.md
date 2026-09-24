@@ -205,6 +205,19 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
   ```
   `%LOCALAPPDATA%\Programs\agent-statusline` に配置され、`PATH` へ自動登録。
 
+### 6.3 自己更新・自動アップデート機構 (`agent-statusline update`)
+
+Claude Code と同等のゼロ・ダウンタイム自動更新機構を備えます。
+
+1. **実行中バイナリの安全な置換 (Windows 対応)**:
+   - Windows では実行中の `.exe` ファイルは直接上書き・削除できませんが、**リネーム（移動）は許可**されています。
+   - `update` 実行時、現在のバイナリ（`agent-statusline.exe`）を一時ファイル（`agent-statusline.exe.old`）にリネームした上で、GitHub Releases からダウンロードした最新バイナリを `agent-statusline.exe` として配置します。
+   - 現在のプロセスは無停止で終了し、**次回エージェントが statusline を呼び出した瞬間から新バージョンが即座に起動**します（`.old` は次回起動時に自動クリーンアップ）。
+2. **24時間非同期バックグラウンドチェック (Zero-Latency)**:
+   - `render` 実行時はキャッシュファイル（`~/.cache/agent-statusline/update_check.json`）のタイムスタンプのみをチェック（0ms）。
+   - 24 時間以上経過している場合のみ、バックグラウンドで非同期プロセスをスポーンして GitHub Releases API に最新タグを問い合わせます。
+   - `render` の描画速度（1〜3ms）には一切干渉しません。
+
 ---
 
 ## 7. 開発ロードマップ
@@ -228,4 +241,5 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
 - [ ] **Phase 4: CI/CD・自動配布・品質保証**
   - [ ] GitHub Actions ワークフロー（`cargo fmt`, `cargo clippy`, `cargo test`）
   - [ ] `cargo-dist` の導入と自動リリースパイプライン
+  - [ ] 自己更新サブコマンド (`agent-statusline update`) & バックグラウンド更新チェックの実装
   - [ ] Renovate 連携（`scottlz0310/renovate-config`）

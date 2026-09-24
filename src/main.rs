@@ -61,6 +61,9 @@ fn main() -> io::Result<()> {
         Commands::Status => {
             println!("Status subcommand (Phase 2)");
         }
+        Commands::Update => {
+            println!("Update subcommand (Phase 4): self-update to latest release");
+        }
         Commands::Init { shell } => {
             println!("Init subcommand (Phase 4): shell={shell:?}");
         }

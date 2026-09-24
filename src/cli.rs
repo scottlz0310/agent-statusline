@@ -54,6 +54,9 @@ pub enum Commands {
     /// Diagnose statusline installation status across all agents
     Status,
 
+    /// Self-update binary to the latest GitHub Release
+    Update,
+
     /// Output shell integration script
     Init {
         #[arg(value_enum)]

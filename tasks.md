@@ -31,5 +31,6 @@
 ## Phase 4: CI/CD・自動配布・品質保証
 - [ ] GitHub Actions ワークフロー (`ci.yml`: fmt, clippy, test)
 - [ ] `cargo-dist` の設定とリリースクロスビルドワークフロー (`release.yml`)
+- [ ] 自己更新サブコマンド (`update`) & バックグラウンド更新チェックの実装
 - [ ] Renovate 設定 (`renovate.json`) の整備
 - [ ] ドキュメントの最終整備とリリース準備

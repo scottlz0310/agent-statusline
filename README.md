@@ -17,6 +17,8 @@ AI コーディングエージェント（Antigravity CLI, Claude Code, GitHub C
   - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` 等）への statusline コマンド登録・解除をワンコマンドで自動実行。
 - 🐿️ **Squirrel Notifier 連携**:
   - 各クライアントのレートリミット状態（5時間枠・週次枠・クォータ残量）を共通スキーマ（`schemaVersion: 1`）に集約し、ローカルへ原子的（Atomic rename）に出力。
+- 🔄 **ゼロ・ダウンタイム自動更新 (`agent-statusline update`)**:
+  - Claude Code 同様、実行中のバイナリを安全にリネーム置換。実行中セッションを中断することなく次回起動時から新バージョンへシームレスに切り替え。
 - 🎨 **Starship ライクな TOML 設定**:
   - `$directory$git_branch...` や `[text](style)` による柔軟な見た目のカスタマイズ（ゼロコンフィグでも洗練された 3 行表示を提供）。
 
@@ -29,6 +31,13 @@ AI コーディングエージェント（Antigravity CLI, Claude Code, GitHub C
 ```powershell
 # Windows (PowerShell)
 irm https://github.com/scottlz0310/agent-statusline/releases/latest/download/agent-statusline-installer.ps1 | iex
+```
+
+### バイナリの自己更新
+
+```bash
+# 最新リリースへ自己更新 (実行中でも即時置換・次回適用)
+agent-statusline update
 ```
 
 ### クライアント設定の自動登録
