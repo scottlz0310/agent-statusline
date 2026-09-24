@@ -82,8 +82,12 @@ impl StatuslineAdapter for CopilotAdapter {
                     .current_context_used_percentage
                     .or(cw.used_percentage)
                     .map(clamp_pct);
-                let tokens = cw.current_context_tokens.or(cw.total_input_tokens);
-                (pct, tokens, cw.total_output_tokens)
+                if let Some(current_tokens) = cw.current_context_tokens {
+                    // current_context_tokens は現コンテキストの全体トークン数のため累積 output を合算しない
+                    (pct, Some(current_tokens), None)
+                } else {
+                    (pct, cw.total_input_tokens, cw.total_output_tokens)
+                }
             } else if let Some(ctx) = input.context {
                 let pct = ctx.percentage.map(clamp_pct);
                 (pct, ctx.total_tokens, None)
@@ -197,13 +201,18 @@ mod tests {
         assert_eq!(state.model.as_deref(), Some("Claude 3.7 Sonnet"));
         assert_eq!(state.context_used_percentage, Some(23));
         assert_eq!(state.total_input_tokens, Some(29800));
-        assert_eq!(state.total_output_tokens, Some(1200));
+        assert_eq!(state.total_output_tokens, None);
         assert_eq!(state.agent_state.as_deref(), Some("idle"));
         assert_eq!(state.quotas.len(), 1);
         assert_eq!(state.quotas[0].used_percentage, Some(10));
         assert_eq!(state.quotas[0].reset_in_seconds, Some(1800));
 
         assert!(payload.is_some());
+
+        // render_default で 29,800 tokens が累積 output と合算されず "29k tok" となることを検証
+        let rendered = crate::engine::formatter::render_default(&state, 120);
+        assert!(rendered.contains("Ctx: 23%"));
+        assert!(rendered.contains("29k tok"));
     }
 
     #[test]
