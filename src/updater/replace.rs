@@ -162,15 +162,34 @@ mod tests {
                 .unwrap();
             zip.write_all(b"readme content").unwrap();
 
-            zip.start_file("agent-statusline.exe", SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(b"binary-content-123").unwrap();
+            // Windows binary in subdirectory (cargo-dist archive structure)
+            zip.start_file(
+                "agent-statusline-x86_64-pc-windows-msvc/agent-statusline.exe",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"windows-binary-content").unwrap();
+
+            // Linux binary in subdirectory
+            zip.start_file(
+                "agent-statusline-x86_64-unknown-linux-musl/agent-statusline",
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"linux-binary-content").unwrap();
+
             zip.finish().unwrap();
         }
 
-        let extracted = extract_binary_from_zip(&zip_buf, "agent-statusline.exe").unwrap();
-        assert_eq!(extracted, b"binary-content-123");
+        // Verify Windows binary extraction
+        let win_extracted = extract_binary_from_zip(&zip_buf, "agent-statusline.exe").unwrap();
+        assert_eq!(win_extracted, b"windows-binary-content");
 
+        // Verify Linux binary extraction
+        let linux_extracted = extract_binary_from_zip(&zip_buf, "agent-statusline").unwrap();
+        assert_eq!(linux_extracted, b"linux-binary-content");
+
+        // Verify missing binary
         let err = extract_binary_from_zip(&zip_buf, "nonexistent.exe");
         assert!(err.is_err());
     }

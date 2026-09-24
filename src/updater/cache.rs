@@ -50,27 +50,48 @@ pub fn check_update_background_if_needed() {
     let cache_path = get_cache_file_path();
     let now = chrono::Utc::now().timestamp();
 
-    if let Some(cache) = UpdateCache::load(&cache_path)
+    check_update_background_core(&cache_path, now, || {
+        if let Ok(current_exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(current_exe)
+                .arg("update")
+                .arg("--background")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    });
+}
+
+/// Core logic for background update check with dependency injection for spawning.
+pub fn check_update_background_core<F: FnOnce()>(cache_path: &Path, now: i64, spawn_fn: F) -> bool {
+    if let Some(cache) = UpdateCache::load(cache_path)
         && cache.is_fresh(now)
     {
-        return;
+        return false;
     }
 
-    // Spawn detached background process
-    if let Ok(current_exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(current_exe)
-            .arg("update")
-            .arg("--background")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
+    // Immediately record check attempt timestamp to suppress duplicate concurrent spawns
+    let current_pkg = env!("CARGO_PKG_VERSION");
+    let touch_cache = UpdateCache::load(cache_path).unwrap_or_else(|| UpdateCache {
+        last_checked_at: now,
+        latest_version: current_pkg.to_string(),
+        has_update: false,
+    });
+    let updated = UpdateCache {
+        last_checked_at: now,
+        ..touch_cache
+    };
+    let _ = updated.save(cache_path);
+
+    spawn_fn();
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_update_cache_roundtrip_and_freshness() {
@@ -93,7 +114,41 @@ mod tests {
         assert!(loaded.is_fresh(now + 86399));
 
         // Expired after 24 hours
-        assert!(!loaded.is_fresh(now + 86400));
-        assert!(!loaded.is_fresh(now + 100000));
+        assert!(!loaded.is_fresh(now + 86_400));
+        assert!(!loaded.is_fresh(now + 100_000));
+    }
+
+    #[test]
+    fn test_background_check_suppresses_duplicate_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("update_check.json");
+
+        let spawn_count = AtomicUsize::new(0);
+        let now = 1_700_000_000;
+
+        // 1st call: cache does not exist, should spawn and touch cache
+        let spawned = check_update_background_core(&cache_path, now, || {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(spawned);
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+
+        // Verify cache file was written with `now`
+        let loaded = UpdateCache::load(&cache_path).unwrap();
+        assert_eq!(loaded.last_checked_at, now);
+
+        // 2nd call 10 seconds later: cache is fresh, should NOT spawn
+        let spawned2 = check_update_background_core(&cache_path, now + 10, || {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(!spawned2);
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+
+        // 3rd call 24 hours + 1s later: cache expired, should spawn again
+        let spawned3 = check_update_background_core(&cache_path, now + 86_401, || {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(spawned3);
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
     }
 }

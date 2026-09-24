@@ -12,21 +12,8 @@ pub use semver::Version;
 
 /// Execute the self-update subcommand logic.
 pub fn run_update(check_only: bool, force: bool, background: bool) -> io::Result<()> {
-    // If running in background check mode, quietly fetch and update cache
     if background {
-        if let Ok(release) = fetch_latest_release() {
-            let current = env!("CARGO_PKG_VERSION");
-            let has_update = match (Version::parse(current), Version::parse(&release.tag_name)) {
-                (Some(c), Some(l)) => l.is_newer_than(&c),
-                _ => false,
-            };
-            let cache = UpdateCache {
-                last_checked_at: chrono::Utc::now().timestamp(),
-                latest_version: release.tag_name,
-                has_update,
-            };
-            let _ = cache.save(&get_cache_file_path());
-        }
+        run_background_update();
         return Ok(());
     }
 
@@ -112,13 +99,88 @@ pub fn run_update(check_only: bool, force: bool, background: bool) -> io::Result
     Ok(())
 }
 
+fn run_background_update() {
+    let current = env!("CARGO_PKG_VERSION");
+    let cache_path = get_cache_file_path();
+    let existing = UpdateCache::load(&cache_path);
+
+    if let Ok(release) = fetch_latest_release() {
+        let has_update = match (Version::parse(current), Version::parse(&release.tag_name)) {
+            (Some(c), Some(l)) => l.is_newer_than(&c),
+            _ => false,
+        };
+        let cache = UpdateCache {
+            last_checked_at: chrono::Utc::now().timestamp(),
+            latest_version: release.tag_name,
+            has_update,
+        };
+        let _ = cache.save(&cache_path);
+    } else {
+        // If API fetch fails (offline, rate limit, GitHub down),
+        // ensure last_checked_at is updated to prevent continuous retries on every render
+        let cache = existing.unwrap_or_else(|| UpdateCache {
+            last_checked_at: chrono::Utc::now().timestamp(),
+            latest_version: current.to_string(),
+            has_update: false,
+        });
+        let updated = UpdateCache {
+            last_checked_at: chrono::Utc::now().timestamp(),
+            ..cache
+        };
+        let _ = updated.save(&cache_path);
+    }
+}
+
 #[must_use]
 pub fn get_target_asset_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "agent-statusline-x86_64-pc-windows-msvc.zip"
-    } else if cfg!(target_arch = "aarch64") {
-        "agent-statusline-aarch64-unknown-linux-musl.tar.xz"
+    let os = if cfg!(target_os = "windows") {
+        "windows"
     } else {
-        "agent-statusline-x86_64-unknown-linux-musl.tar.xz"
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    get_asset_name_for(os, arch)
+}
+
+#[must_use]
+pub fn get_asset_name_for(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
+        ("windows", "x86_64") => "agent-statusline-x86_64-pc-windows-msvc.zip",
+        ("linux", "aarch64") => "agent-statusline-aarch64-unknown-linux-musl.zip",
+        _ => "agent-statusline-x86_64-unknown-linux-musl.zip",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_asset_names_are_all_zip() {
+        let targets = [
+            ("windows", "x86_64"),
+            ("linux", "aarch64"),
+            ("linux", "x86_64"),
+        ];
+
+        for (os, arch) in targets {
+            let asset = get_asset_name_for(os, arch);
+            assert!(
+                std::path::Path::new(asset)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")),
+                "Asset '{asset}' for {os}/{arch} must be a .zip file"
+            );
+        }
+
+        assert!(
+            std::path::Path::new(get_target_asset_name())
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+        );
     }
 }
