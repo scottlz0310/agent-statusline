@@ -4,15 +4,15 @@
 - [x] プロジェクト構想仕様書の更新 ([agent-statusline-spec.md](docs/agent-statusline-spec.md))
 - [x] プロジェクト初期ドキュメントの作成 ([README.md](README.md), [tasks.md](tasks.md), [CHANGELOG.md](CHANGELOG.md))
 - [x] プロジェクトスキャフォールドの構築 (`Cargo.toml`, `.gitignore`, `renovate.json`, `.github/workflows/ci.yml`, `src/`)
-- [ ] 内部共通データモデルの実装 (`StatuslineState`, `RatelimitStatus`)
-- [ ] `StatuslineAdapter` トレイトの定義
-- [ ] `AntigravityAdapter` (`agy`) の実装
-- [ ] `ClaudeAdapter` (`claude`) の実装
-- [ ] `CopilotAdapter` (`copilot`) の実装
-- [ ] `gix` によるインプロセス Git 状態検出モジュールの実装
-- [ ] クォータ計算および Squirrel Notifier 原子的書き出しモジュールの実装
-- [ ] デフォルト 3 行 ANSI レンダリングエンジンの実装
-- [ ] `render` コマンドの実装と実行レイテンシ検証 (< 5ms)
+- [x] 内部共通データモデルの実装 (`StatuslineState`, `RatelimitStatus`)
+- [x] `StatuslineAdapter` トレイトの定義
+- [x] `AntigravityAdapter` (`agy`) の実装
+- [x] `ClaudeAdapter` (`claude`) の実装
+- [x] `CopilotAdapter` (`copilot`) の実装
+- [x] `gix` によるインプロセス Git 状態検出モジュールの実装
+- [x] クォータ計算および Squirrel Notifier 原子的書き出しモジュールの実装
+- [x] デフォルト 3 行 ANSI レンダリングエンジンの実装
+- [x] `render` コマンドの実装と実行レイテンシ検証 (< 5ms 実測 4.2ms)
 
 ## Phase 2: クライアント設定自動化 (`install` / `uninstall` / `status`)
 - [ ] 各クライアントの設定ファイルパス解決 (`paths.rs`)

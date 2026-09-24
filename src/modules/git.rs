@@ -23,3 +23,26 @@ pub fn get_git_status(path: &Path) -> GitStatus {
 
     GitStatus { branch, is_dirty }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_git_status_in_repo() {
+        let status = get_git_status(Path::new("."));
+        assert!(status.branch.is_some());
+        // 現在のブランチは feat/phase1-core-render-poc
+        assert_eq!(
+            status.branch.as_deref(),
+            Some("feat/phase1-core-render-poc")
+        );
+    }
+
+    #[test]
+    fn test_get_git_status_non_repo() {
+        let temp_dir = std::env::temp_dir();
+        // temp ディレクトリ直下は通常 git リポジトリではないか、discover で安全に処理される
+        let _status = get_git_status(&temp_dir);
+    }
+}

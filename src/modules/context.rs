@@ -6,3 +6,29 @@ pub fn format_tokens(tokens: u64) -> String {
         tokens.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_tokens() {
+        let cases = [
+            (0, "0"),
+            (500, "500"),
+            (999, "999"),
+            (1000, "1k"),
+            (12500, "12k"),
+            (88396, "88k"),
+            (1048576, "1048k"),
+        ];
+
+        for (tokens, expected) in cases {
+            assert_eq!(
+                format_tokens(tokens),
+                expected,
+                "failed for tokens: {tokens}"
+            );
+        }
+    }
+}

@@ -86,3 +86,46 @@ pub fn render_default(state: &StatuslineState, terminal_width: usize) -> String 
 
     output_lines.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::state::QuotaItem;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_render_default_output() {
+        let state = StatuslineState {
+            cwd: PathBuf::from("C:\\Users\\jojob\\src\\myproject"),
+            model: Some("Gemini 3.8 Flash".to_string()),
+            context_used_percentage: Some(15),
+            total_input_tokens: Some(50000),
+            total_output_tokens: Some(12000),
+            agent_state: Some("working".to_string()),
+            sandbox_enabled: true,
+            plan_tier: Some("Google AI Pro".to_string()),
+            quotas: vec![QuotaItem {
+                id: "gemini-5h".to_string(),
+                label: "Gemini 5h".to_string(),
+                used_percentage: Some(5),
+                reset_in_seconds: Some(3600),
+                reset_time_iso: None,
+            }],
+        };
+
+        let rendered = render_default(&state, 120);
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("myproject"));
+        assert!(lines[0].contains("sandbox"));
+        assert!(lines[1].contains("Gemini 3.8 Flash"));
+        assert!(lines[1].contains("Ctx: 15%"));
+        assert!(lines[1].contains("62k tok"));
+        assert!(lines[1].contains("working"));
+        assert!(lines[1].contains("Google AI Pro"));
+        assert!(lines[2].contains("Gemini 5h:"));
+        assert!(lines[2].contains("5%"));
+        assert!(lines[2].contains("rst 1h0m"));
+    }
+}

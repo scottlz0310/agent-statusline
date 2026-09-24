@@ -22,7 +22,8 @@ fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Render { agent, .. } => {
+        Commands::Render { agent, bench, .. } => {
+            let start = std::time::Instant::now();
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
 
@@ -47,6 +48,14 @@ fn main() -> io::Result<()> {
 
             let output = render_default(&state, term_width);
             println!("{output}");
+
+            if bench {
+                let elapsed = start.elapsed();
+                eprintln!(
+                    "[agent-statusline] Render completed in {:.3}ms",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            }
         }
         Commands::Install {
             agent,
