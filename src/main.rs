@@ -15,7 +15,6 @@ use adapter::StatuslineAdapter;
 use adapter::agy::AntigravityAdapter;
 use adapter::claude::ClaudeAdapter;
 use adapter::copilot::CopilotAdapter;
-use engine::formatter::render_default;
 use engine::style::{BOLD, CYAN, DIMMED, GREEN, RED, RESET, YELLOW};
 use installer::{
     AgentConfigTarget, AgentStatusReport, PatchAction, PatchResult, StatusKind, diagnose_agent,
@@ -29,9 +28,10 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Render {
             agent,
+            config,
             bench,
             shell,
-        } => cmd_render(agent, shell, bench),
+        } => cmd_render(agent, shell, config.as_deref(), bench),
         Commands::Install {
             agent,
             all,
@@ -57,7 +57,12 @@ fn main() -> io::Result<()> {
     }
 }
 
-fn cmd_render(agent: AgentKind, _shell: ShellKind, bench: bool) -> io::Result<()> {
+fn cmd_render(
+    agent: AgentKind,
+    _shell: ShellKind,
+    config_path: Option<&std::path::Path>,
+    bench: bool,
+) -> io::Result<()> {
     let start = std::time::Instant::now();
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
@@ -65,6 +70,8 @@ fn cmd_render(agent: AgentKind, _shell: ShellKind, bench: bool) -> io::Result<()
     if input.trim().is_empty() {
         return Ok(());
     }
+
+    let config = engine::config::load_config(config_path);
 
     let adapter: Box<dyn StatuslineAdapter> = match agent {
         AgentKind::Agy => Box::new(AntigravityAdapter),
@@ -75,13 +82,20 @@ fn cmd_render(agent: AgentKind, _shell: ShellKind, bench: bool) -> io::Result<()
     let (state, ratelimit_payload) = adapter.parse(&input);
 
     // Squirrel Notifier 連携 (原子的書き出し)
-    if let Some(payload) = ratelimit_payload {
-        let _ = write_ratelimit_status(&payload);
+    if config.integrations.squirrel_notifier.enabled
+        && let Some(payload) = ratelimit_payload
+    {
+        if let Some(custom_dir) = &config.integrations.squirrel_notifier.output_dir {
+            let expanded_path = sink::notifier::expand_env_path(custom_dir);
+            let _ = sink::notifier::write_ratelimit_status_to_dir(&payload, &expanded_path);
+        } else {
+            let _ = write_ratelimit_status(&payload);
+        }
     }
 
     let term_width = terminal_size::terminal_size().map_or(80, |(w, _)| w.0 as usize);
 
-    let output = render_default(&state, term_width);
+    let output = engine::formatter::render_template(&config, &state, term_width);
     println!("{output}");
 
     if bench {

@@ -24,6 +24,10 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value = "pwsh")]
         shell: ShellKind,
 
+        /// Path to custom config file
+        #[arg(short, long)]
+        config: Option<std::path::PathBuf>,
+
         /// Output execution time breakdown to stderr
         #[arg(long)]
         bench: bool,
