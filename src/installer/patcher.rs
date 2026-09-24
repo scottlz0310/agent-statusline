@@ -202,11 +202,8 @@ pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Re
         });
     };
 
-    // 独自 statusline かどうかを判定
-    let is_agent_statusline = current_statusline
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|cmd| cmd.contains("agent-statusline"));
+    // 独自 statusline かどうかを判定 (トークン一致・引数検証による厳格な判定)
+    let is_agent_statusline = is_managed_by_agent_statusline(current_statusline, target.agent);
 
     if !is_agent_statusline {
         // 独自 statusline は保護してスキップ
@@ -221,7 +218,7 @@ pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Re
 
     // バックアップ (.bak) に元の独自 statusLine があれば復元
     let backup_path = make_backup_path(&target.path);
-    let restored_statusline = try_restore_custom_statusline(&backup_path);
+    let restored_statusline = try_restore_custom_statusline(&backup_path, target.agent);
     let restored = restored_statusline.is_some();
 
     if let Some(custom_statusline) = restored_statusline {
@@ -329,7 +326,7 @@ pub fn diagnose_agent(target: &AgentConfigTarget) -> AgentStatusReport {
     let enabled = statusline.get("enabled").and_then(Value::as_bool);
 
     let status = if let Some(cmd) = &command {
-        if cmd.contains("agent-statusline") {
+        if is_managed_by_agent_statusline(statusline, target.agent) {
             StatusKind::Installed
         } else {
             StatusKind::Custom(cmd.clone())
@@ -426,7 +423,46 @@ pub fn extract_leading_comments(s: &str) -> String {
     comments
 }
 
-fn try_restore_custom_statusline(backup_path: &Path) -> Option<Value> {
+/// statusLine 設定が agent-statusline によって管理されている正規設定かを厳格に判定する
+#[must_use]
+pub fn is_managed_by_agent_statusline(statusline: &Value, expected_agent: AgentKind) -> bool {
+    let Some(cmd) = statusline.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    // 最初のトークンからファイル名を取得 (パスや .exe を考慮)
+    let prog = Path::new(tokens[0])
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(tokens[0]);
+
+    let prog_name = prog.strip_suffix(".exe").unwrap_or(prog);
+    if prog_name != "agent-statusline" {
+        return false;
+    }
+
+    // 次のトークンが "render" であること
+    if tokens.len() < 2 || tokens[1] != "render" {
+        return false;
+    }
+
+    // "--agent" 引数が指定されている場合、対象エージェントと一致すること
+    if let Some(pos) = tokens.iter().position(|&t| t == "--agent") {
+        return tokens
+            .get(pos + 1)
+            .is_some_and(|&a| a == expected_agent.as_str());
+    }
+
+    // "--agent" が省略されている場合、デフォルトは agy
+    expected_agent == AgentKind::Agy
+}
+
+fn try_restore_custom_statusline(backup_path: &Path, expected_agent: AgentKind) -> Option<Value> {
     if !backup_path.exists() {
         return None;
     }
@@ -434,10 +470,7 @@ fn try_restore_custom_statusline(backup_path: &Path) -> Option<Value> {
     let bak_stripped = strip_json_comments(&bak_content);
     let bak_json = serde_json::from_str::<Value>(&bak_stripped).ok()?;
     let bak_statusline = bak_json.get("statusLine")?;
-    let is_bak_agent = bak_statusline
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|cmd| cmd.contains("agent-statusline"));
+    let is_bak_agent = is_managed_by_agent_statusline(bak_statusline, expected_agent);
     if is_bak_agent {
         None
     } else {
@@ -742,6 +775,65 @@ mod tests {
         assert_eq!(
             val["statusLine"]["command"],
             "agent-statusline render --agent copilot"
+        );
+    }
+
+    #[test]
+    fn test_uninstall_preserve_custom_wrapper_name_collision() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = AgentConfigTarget::resolve_with_home(AgentKind::Claude, temp_dir.path());
+
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            r#"{"statusLine": {"type": "command", "command": "my-agent-statusline-wrapper --theme custom"}}"#,
+        )
+        .unwrap();
+
+        // 独自ラッパーコマンドは名前衝突せず保護される
+        let unres = uninstall_from_agent(&target, false).unwrap();
+        assert_eq!(unres.action, PatchAction::SkippedCustom);
+
+        let content = fs::read_to_string(&target.path).unwrap();
+        let val: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            val["statusLine"]["command"],
+            "my-agent-statusline-wrapper --theme custom"
+        );
+
+        // diagnose でも Custom として認識される
+        let diag = diagnose_agent(&target);
+        assert_eq!(
+            diag.status,
+            StatusKind::Custom("my-agent-statusline-wrapper --theme custom".into())
+        );
+    }
+
+    #[test]
+    fn test_install_and_uninstall_roundtrip_restores_custom_wrapper() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = AgentConfigTarget::resolve_with_home(AgentKind::Agy, temp_dir.path());
+
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            r#"{"statusLine": {"type": "command", "command": "my-agent-statusline-wrapper --opt 1"}}"#,
+        )
+        .unwrap();
+
+        // 1. install: agent-statusline に置き換わり、バックアップが保存される
+        let inst = install_to_agent(&target, false).unwrap();
+        assert_eq!(inst.action, PatchAction::Installed);
+
+        // 2. uninstall: バックアップから my-agent-statusline-wrapper が復元される
+        let uninst = uninstall_from_agent(&target, false).unwrap();
+        assert_eq!(uninst.action, PatchAction::RestoredBackup);
+
+        let content = fs::read_to_string(&target.path).unwrap();
+        let val: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            val["statusLine"]["command"],
+            "my-agent-statusline-wrapper --opt 1"
         );
     }
 }
