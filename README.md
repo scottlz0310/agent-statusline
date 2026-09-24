@@ -87,7 +87,7 @@ winget install evilmartians.lefthook
 # macOS / Linux (Homebrew)
 brew install lefthook
 # または Go
-go install github.com/evilmartians/lefthook@latest
+go install github.com/evilmartians/lefthook/v2@latest
 
 # Git フックの登録
 lefthook install
