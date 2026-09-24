@@ -164,6 +164,30 @@ fn cmd_uninstall(agents: Vec<AgentKind>, all: bool, dry_run: bool) -> io::Result
                     println!("{CYAN}Preview JSON:{RESET}\n{preview}");
                 }
             }
+            PatchAction::RestoredBackup => {
+                let prefix = if dry_run {
+                    "[DRY-RUN] Would restore original custom"
+                } else {
+                    "✓ Restored original custom"
+                };
+                println!(
+                    "{GREEN}{prefix} statusLine for {BOLD}{}{RESET}{GREEN}:{RESET} {}",
+                    res.agent.display_name(),
+                    res.path.display()
+                );
+                if let Some(bak) = res.backup_path {
+                    println!("  {DIMMED}Backup saved to {}{RESET}", bak.display());
+                }
+                if let Some(preview) = res.preview {
+                    println!("{CYAN}Preview JSON:{RESET}\n{preview}");
+                }
+            }
+            PatchAction::SkippedCustom => {
+                println!(
+                    "{YELLOW}⚠ Skipped uninstall for {BOLD}{}{RESET}{YELLOW}: custom statusLine preserved{RESET}",
+                    res.agent.display_name()
+                );
+            }
             PatchAction::NotInstalled => {
                 println!(
                     "{DIMMED}- statusLine was not configured for {}{RESET}",

@@ -11,6 +11,8 @@ pub enum PatchAction {
     AlreadyInstalled,
     Uninstalled,
     NotInstalled,
+    SkippedCustom,
+    RestoredBackup,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +192,7 @@ pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Re
         .as_object_mut()
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Root JSON must be an object"))?;
 
-    if obj.remove("statusLine").is_none() {
+    let Some(current_statusline) = obj.get("statusLine") else {
         return Ok(PatchResult {
             agent: target.agent,
             path: target.path.clone(),
@@ -198,30 +200,63 @@ pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Re
             backup_path: None,
             preview: None,
         });
+    };
+
+    // 独自 statusline かどうかを判定
+    let is_agent_statusline = current_statusline
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|cmd| cmd.contains("agent-statusline"));
+
+    if !is_agent_statusline {
+        // 独自 statusline は保護してスキップ
+        return Ok(PatchResult {
+            agent: target.agent,
+            path: target.path.clone(),
+            action: PatchAction::SkippedCustom,
+            backup_path: None,
+            preview: None,
+        });
+    }
+
+    // バックアップ (.bak) に元の独自 statusLine があれば復元
+    let backup_path = make_backup_path(&target.path);
+    let restored_statusline = try_restore_custom_statusline(&backup_path);
+    let restored = restored_statusline.is_some();
+
+    if let Some(custom_statusline) = restored_statusline {
+        obj.insert("statusLine".to_string(), custom_statusline);
+    } else {
+        obj.remove("statusLine");
     }
 
     let body_str =
         serde_json::to_string_pretty(&json_val).map_err(|e| Error::other(e.to_string()))? + "\n";
     let updated_str = format!("{leading_comments}{body_str}");
 
+    let action = if restored {
+        PatchAction::RestoredBackup
+    } else {
+        PatchAction::Uninstalled
+    };
+
     if dry_run {
         return Ok(PatchResult {
             agent: target.agent,
             path: target.path.clone(),
-            action: PatchAction::Uninstalled,
+            action,
             backup_path: None,
             preview: Some(updated_str),
         });
     }
 
-    let backup_path = make_backup_path(&target.path);
     fs::copy(&target.path, &backup_path)?;
     atomic_write(&target.path, updated_str.as_bytes())?;
 
     Ok(PatchResult {
         agent: target.agent,
         path: target.path.clone(),
-        action: PatchAction::Uninstalled,
+        action,
         backup_path: Some(backup_path),
         preview: None,
     })
@@ -361,13 +396,27 @@ pub fn strip_json_comments(s: &str) -> String {
     out
 }
 
-/// ファイル先頭のコメントヘッダー行を抽出する
+/// ファイル先頭のコメントヘッダー行を抽出する (複数行 /* ... */ ブロックも完全に保持)
 #[must_use]
 pub fn extract_leading_comments(s: &str) -> String {
     let mut comments = String::new();
+    let mut in_block_comment = false;
+
     for line in s.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.is_empty() {
+        if in_block_comment {
+            comments.push_str(line);
+            comments.push('\n');
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+        } else if trimmed.starts_with("/*") {
+            comments.push_str(line);
+            comments.push('\n');
+            if !line.contains("*/") {
+                in_block_comment = true;
+            }
+        } else if trimmed.starts_with("//") || trimmed.is_empty() {
             comments.push_str(line);
             comments.push('\n');
         } else {
@@ -375,6 +424,25 @@ pub fn extract_leading_comments(s: &str) -> String {
         }
     }
     comments
+}
+
+fn try_restore_custom_statusline(backup_path: &Path) -> Option<Value> {
+    if !backup_path.exists() {
+        return None;
+    }
+    let bak_content = fs::read_to_string(backup_path).ok()?;
+    let bak_stripped = strip_json_comments(&bak_content);
+    let bak_json = serde_json::from_str::<Value>(&bak_stripped).ok()?;
+    let bak_statusline = bak_json.get("statusLine")?;
+    let is_bak_agent = bak_statusline
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|cmd| cmd.contains("agent-statusline"));
+    if is_bak_agent {
+        None
+    } else {
+        Some(bak_statusline.clone())
+    }
 }
 
 fn make_backup_path(path: &Path) -> PathBuf {
@@ -429,10 +497,17 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_leading_comments() {
+    fn test_extract_leading_comments_single_and_multiline() {
         let text = "// Line 1\n// Line 2\n\n{\n  \"foo\": \"bar\"\n}";
         let leading = extract_leading_comments(text);
         assert_eq!(leading, "// Line 1\n// Line 2\n\n");
+
+        let multiline = "/*\n * Header comment\n * Description\n */\n\n{\n  \"key\": 1\n}";
+        let leading_multi = extract_leading_comments(multiline);
+        assert_eq!(
+            leading_multi,
+            "/*\n * Header comment\n * Description\n */\n\n"
+        );
     }
 
     #[test]
@@ -484,14 +559,14 @@ mod tests {
     }
 
     #[test]
-    fn test_install_preserve_leading_comments() {
+    fn test_install_preserve_multiline_block_comments() {
         let temp_dir = TempDir::new().unwrap();
         let target = AgentConfigTarget::resolve_with_home(AgentKind::Copilot, temp_dir.path());
 
         fs::create_dir_all(target.path.parent().unwrap()).unwrap();
         fs::write(
             &target.path,
-            "// Custom header\n// Do not delete\n{\n  \"model\": \"gpt-4o\"\n}\n",
+            "/*\n * Custom header block\n * Do not remove\n */\n{\n  \"model\": \"gpt-4o\"\n}\n",
         )
         .unwrap();
 
@@ -499,7 +574,7 @@ mod tests {
         assert_eq!(res.action, PatchAction::Installed);
 
         let content = fs::read_to_string(&target.path).unwrap();
-        assert!(content.starts_with("// Custom header\n// Do not delete\n"));
+        assert!(content.starts_with("/*\n * Custom header block\n * Do not remove\n */\n"));
         let stripped = strip_json_comments(&content);
         let val: Value = serde_json::from_str(&stripped).unwrap();
         assert_eq!(val["model"], "gpt-4o");
@@ -508,6 +583,60 @@ mod tests {
             "agent-statusline render --agent copilot"
         );
         assert_eq!(val["footer"]["showCustom"], true);
+
+        // さらに uninstall してもヘッダーが保持される
+        let unres = uninstall_from_agent(&target, false).unwrap();
+        assert_eq!(unres.action, PatchAction::Uninstalled);
+        let un_content = fs::read_to_string(&target.path).unwrap();
+        assert!(un_content.starts_with("/*\n * Custom header block\n * Do not remove\n */\n"));
+    }
+
+    #[test]
+    fn test_uninstall_preserve_custom_statusline() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = AgentConfigTarget::resolve_with_home(AgentKind::Agy, temp_dir.path());
+
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            r#"{"statusLine": {"type": "command", "command": "custom-status.sh"}}"#,
+        )
+        .unwrap();
+
+        // 独自 statusline は uninstall でスキップされ保護される
+        let unres = uninstall_from_agent(&target, false).unwrap();
+        assert_eq!(unres.action, PatchAction::SkippedCustom);
+
+        let content = fs::read_to_string(&target.path).unwrap();
+        let val: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(val["statusLine"]["command"], "custom-status.sh");
+    }
+
+    #[test]
+    fn test_install_and_uninstall_roundtrip_restores_custom() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = AgentConfigTarget::resolve_with_home(AgentKind::Claude, temp_dir.path());
+
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            r#"{"statusLine": {"type": "command", "command": "my-custom-prompt.sh"}, "other": 1}"#,
+        )
+        .unwrap();
+
+        // 1. install 実行: 独自設定がバックアップされ、agent-statusline が設定される
+        let inst = install_to_agent(&target, false).unwrap();
+        assert_eq!(inst.action, PatchAction::Installed);
+        let content_inst = fs::read_to_string(&target.path).unwrap();
+        assert!(content_inst.contains("agent-statusline render --agent claude"));
+
+        // 2. uninstall 実行: .bak から元の独自 statusline が復元される
+        let uninst = uninstall_from_agent(&target, false).unwrap();
+        assert_eq!(uninst.action, PatchAction::RestoredBackup);
+        let content_un = fs::read_to_string(&target.path).unwrap();
+        let val: Value = serde_json::from_str(&content_un).unwrap();
+        assert_eq!(val["statusLine"]["command"], "my-custom-prompt.sh");
+        assert_eq!(val["other"], 1);
     }
 
     #[test]

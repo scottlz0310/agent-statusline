@@ -12,18 +12,39 @@ impl AgentConfigTarget {
     #[must_use]
     pub fn resolve(agent: AgentKind) -> Option<Self> {
         let home = dirs::home_dir()?;
-        Some(Self::resolve_with_home(agent, &home))
+        let copilot_home = std::env::var_os("COPILOT_HOME").map(PathBuf::from);
+        Some(Self::resolve_with_home_and_env(
+            agent,
+            &home,
+            copilot_home.as_deref(),
+        ))
+    }
+
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn resolve_with_home(agent: AgentKind, home: &Path) -> Self {
+        Self::resolve_with_home_and_env(agent, home, None)
     }
 
     #[must_use]
-    pub fn resolve_with_home(agent: AgentKind, home: &Path) -> Self {
+    pub fn resolve_with_home_and_env(
+        agent: AgentKind,
+        home: &Path,
+        copilot_home: Option<&Path>,
+    ) -> Self {
         let path = match agent {
             AgentKind::Agy => home
                 .join(".gemini")
                 .join("antigravity-cli")
                 .join("settings.json"),
             AgentKind::Claude => home.join(".claude").join("settings.json"),
-            AgentKind::Copilot => home.join(".copilot").join("settings.json"),
+            AgentKind::Copilot => {
+                if let Some(ch) = copilot_home {
+                    ch.join("settings.json")
+                } else {
+                    home.join(".copilot").join("settings.json")
+                }
+            }
         };
         Self { agent, path }
     }
@@ -73,6 +94,19 @@ mod tests {
             copilot.path,
             dummy_home.join(".copilot").join("settings.json")
         );
+    }
+
+    #[test]
+    fn test_resolve_with_copilot_home() {
+        let dummy_home = Path::new("/mock/home");
+        let custom_copilot_home = Path::new("/custom/copilot/dir");
+
+        let copilot = AgentConfigTarget::resolve_with_home_and_env(
+            AgentKind::Copilot,
+            dummy_home,
+            Some(custom_copilot_home),
+        );
+        assert_eq!(copilot.path, custom_copilot_home.join("settings.json"));
     }
 
     #[test]
