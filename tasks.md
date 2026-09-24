@@ -34,7 +34,7 @@
 - [x] エントリポイントコードビハインド行数ラチェット監視の実装 (`scripts/check-code-behind-size.ps1`) (#9)
 - [x] Lefthook Git フックの設定 (`lefthook.yml`: fmt, clippy, code-behind-size, test)
 - [x] Renovate 設定 (`renovate.json`) の整備
-- [ ] `cargo-dist` の設定とリリースクロスビルドワークフロー (`release.yml`)
+- [x] `cargo-dist` の設定とリリースクロスビルドワークフロー (`release.yml`)
 - [ ] 自己更新サブコマンド (`update`) & バックグラウンド更新チェックの実装
 - [ ] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化
 - [ ] ドキュメントの最終整備とリリース準備
