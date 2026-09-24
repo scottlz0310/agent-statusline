@@ -12,10 +12,17 @@ pub struct CopilotAdapter;
 #[derive(Deserialize, Debug)]
 struct CopilotInput {
     cwd: Option<PathBuf>,
+    workspace: Option<CopilotWorkspace>,
     model: Option<CopilotModelInfo>,
     context: Option<CopilotContext>,
+    context_window: Option<CopilotContextWindow>,
     rate_limit: Option<CopilotRateLimit>,
     status: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CopilotWorkspace {
+    current_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -35,6 +42,15 @@ struct CopilotContext {
 }
 
 #[derive(Deserialize, Debug)]
+struct CopilotContextWindow {
+    current_context_used_percentage: Option<f64>,
+    current_context_tokens: Option<u64>,
+    used_percentage: Option<f64>,
+    total_input_tokens: Option<u64>,
+    total_output_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
 struct CopilotRateLimit {
     remaining_percentage: Option<f64>,
     used_percentage: Option<f64>,
@@ -48,7 +64,11 @@ impl StatuslineAdapter for CopilotAdapter {
             return (StatuslineState::default(), None);
         };
 
-        let cwd = input.cwd.unwrap_or_else(|| PathBuf::from("."));
+        let cwd = input
+            .workspace
+            .and_then(|w| w.current_dir)
+            .or(input.cwd)
+            .unwrap_or_else(|| PathBuf::from("."));
 
         let model = match input.model {
             Some(CopilotModelInfo::Object { name, id }) => name.or(id),
@@ -56,12 +76,20 @@ impl StatuslineAdapter for CopilotAdapter {
             None => None,
         };
 
-        let (context_used_percentage, total_input_tokens) = if let Some(ctx) = input.context {
-            let pct = ctx.percentage.map(clamp_pct);
-            (pct, ctx.total_tokens)
-        } else {
-            (None, None)
-        };
+        let (context_used_percentage, total_input_tokens, total_output_tokens) =
+            if let Some(cw) = input.context_window {
+                let pct = cw
+                    .current_context_used_percentage
+                    .or(cw.used_percentage)
+                    .map(clamp_pct);
+                let tokens = cw.current_context_tokens.or(cw.total_input_tokens);
+                (pct, tokens, cw.total_output_tokens)
+            } else if let Some(ctx) = input.context {
+                let pct = ctx.percentage.map(clamp_pct);
+                (pct, ctx.total_tokens, None)
+            } else {
+                (None, None, None)
+            };
 
         let mut quotas = Vec::new();
         let mut ratelimit_limits = Vec::new();
@@ -123,7 +151,7 @@ impl StatuslineAdapter for CopilotAdapter {
             model,
             context_used_percentage,
             total_input_tokens,
-            total_output_tokens: None,
+            total_output_tokens,
             agent_state: input.status,
             sandbox_enabled: false,
             plan_tier: None,
@@ -139,7 +167,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_copilot_json() {
+    fn test_parse_copilot_json_context_window() {
+        // GitHub Copilot CLI issue 4233 報告形式の fixture
+        let raw = r#"{
+            "cwd": "C:\\Users\\jojob\\src\\myproject",
+            "model": {
+                "id": "claude-3.7-sonnet",
+                "name": "Claude 3.7 Sonnet"
+            },
+            "workspace": {
+                "current_dir": "C:\\Users\\jojob\\src\\myproject"
+            },
+            "context_window": {
+                "current_context_used_percentage": 23.4,
+                "current_context_tokens": 29800,
+                "total_output_tokens": 1200
+            },
+            "rate_limit": {
+                "used_percentage": 10.0,
+                "reset_in_seconds": 1800
+            },
+            "status": "idle"
+        }"#;
+
+        let adapter = CopilotAdapter;
+        let (state, payload) = adapter.parse(raw);
+
+        assert_eq!(state.cwd, PathBuf::from("C:\\Users\\jojob\\src\\myproject"));
+        assert_eq!(state.model.as_deref(), Some("Claude 3.7 Sonnet"));
+        assert_eq!(state.context_used_percentage, Some(23));
+        assert_eq!(state.total_input_tokens, Some(29800));
+        assert_eq!(state.total_output_tokens, Some(1200));
+        assert_eq!(state.agent_state.as_deref(), Some("idle"));
+        assert_eq!(state.quotas.len(), 1);
+        assert_eq!(state.quotas[0].used_percentage, Some(10));
+        assert_eq!(state.quotas[0].reset_in_seconds, Some(1800));
+
+        assert!(payload.is_some());
+    }
+
+    #[test]
+    fn test_parse_copilot_json_legacy_context() {
         let raw = r#"{
             "cwd": "C:\\Users\\jojob\\src\\myproject",
             "model": "claude-3.7-sonnet",
