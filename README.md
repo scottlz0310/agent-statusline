@@ -76,15 +76,32 @@ agent-statusline render --agent copilot
 
 ## 開発
 
+### 前提条件と Git フックのセットアップ
+
+本リポジトリではコミット前・プッシュ前の品質検査に [Lefthook](https://github.com/evilmartians/lefthook) を採用しています。初回クローン時にフックを有効化してください。
+
 ```bash
-# フォーマットチェック
+# Lefthook CLI のインストール (例: winget, cargo, homebrew)
+winget install evilmartians.lefthook
+# または
+cargo install lefthook
+
+# Git フックの登録
+lefthook install
+```
+
+### ローカルでの検証
+
+```bash
+# Lefthook によるフック検証
+lefthook run pre-commit --all-files
+lefthook run pre-push --all-files
+
+# 手動での個別チェック
 cargo fmt --check
-
-# リント
 cargo clippy -- -D warnings
-
-# テスト実行
 cargo test
+pwsh -File scripts/check-code-behind-size.ps1
 ```
 
 ## ライセンス
