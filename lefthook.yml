@@ -1,0 +1,20 @@
+# Lefthook configuration
+# Refer to https://github.com/evilmartians/lefthook/blob/master/docs/configuration.md
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-fmt:
+      glob: "*.rs"
+      run: cargo fmt --check
+    rust-clippy:
+      glob: "*.rs"
+      run: cargo clippy -- -D warnings
+    code-behind-size:
+      glob: "{src/main.rs,src/cli.rs,scripts/check-code-behind-size.ps1}"
+      run: pwsh -File scripts/check-code-behind-size.ps1
+
+pre-push:
+  commands:
+    cargo-test:
+      run: cargo test
