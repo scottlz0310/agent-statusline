@@ -16,7 +16,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 dirs = "6.0"
 terminal_size = "0.4.4"
 toml_edit = "0.22.27"
-gix = { version = "0.83", default-features = false, features = ["status", "revision"] }
+gix = { version = "0.83", default-features = false, features = ["status", "revision", "sha1"] }
 
 [profile.release]
 opt-level = 3
