@@ -23,6 +23,10 @@ pub enum Commands {
         /// Shell type for ANSI escaping (pwsh, bash)
         #[arg(short, long, value_enum, default_value = "pwsh")]
         shell: ShellKind,
+
+        /// Output execution time breakdown to stderr
+        #[arg(long)]
+        bench: bool,
     },
 
     /// Automatically install statusline into agent settings

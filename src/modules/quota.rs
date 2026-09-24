@@ -16,3 +16,29 @@ pub fn format_reset_seconds(seconds: i64) -> String {
     let hrs_rem = hrs % 24;
     format!("{days}d{hrs_rem}h")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_reset_seconds() {
+        let cases = [
+            (0, "now"),
+            (-10, "now"),
+            (59, "0m"),
+            (60, "1m"),
+            (45 * 60, "45m"),
+            (17410, "4h50m"),
+            (604210, "6d23h"),
+        ];
+
+        for (seconds, expected) in cases {
+            assert_eq!(
+                format_reset_seconds(seconds),
+                expected,
+                "failed for seconds: {seconds}"
+            );
+        }
+    }
+}

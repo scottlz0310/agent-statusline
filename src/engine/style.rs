@@ -20,3 +20,24 @@ pub fn pct_color(pct: u8) -> &'static str {
         GREEN
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pct_color() {
+        let cases = [
+            (0, GREEN),
+            (49, GREEN),
+            (50, YELLOW),
+            (79, YELLOW),
+            (80, RED),
+            (100, RED),
+        ];
+
+        for (pct, expected) in cases {
+            assert_eq!(pct_color(pct), expected, "failed for pct: {pct}");
+        }
+    }
+}
