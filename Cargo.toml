@@ -13,7 +13,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 chrono = { version = "0.4.45", features = ["serde"] }
-dirs = "6.0"
+dirs = "7.0.0"
 terminal_size = "0.4.4"
 toml_edit = "0.25.15"
 gix = { version = "0.87.1", default-features = false, features = ["status", "revision", "sha1"] }
