@@ -23,9 +23,9 @@ $ErrorActionPreference = "Stop"
 # 値の更新は「抽出して減った」「意図して増やす」のいずれかを PR で説明できるときだけ行う。
 $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力
-    "src/main.rs" = 306
+    "src/main.rs" = 300
     # clap CLI 引数定義
-    "src/cli.rs"  = 130
+    "src/cli.rs"  = 114
 }
 
 $violations = New-Object System.Collections.Generic.List[string]

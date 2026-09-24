@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--config <PATH>` CLI option on `render` subcommand and `AGENT_STATUSLINE_CONFIG` environment variable resolution.
 - Automated client installer (`install`), uninstaller (`uninstall`), and configuration diagnostics (`status`) for Antigravity, Claude Code, and GitHub Copilot CLI.
 
+### Removed
+- Remove unused skeleton `init` subcommand, `--shell` CLI option on `render`, and `ShellKind` enum, tightening code-behind ratchet limits to 300 lines (`src/main.rs`) and 114 lines (`src/cli.rs`).
+
 ### Fixed
 - Unify release distribution archives to ZIP across Windows and Linux musl targets in `cargo-dist` (`dist-workspace.toml`), ensuring reliable zero-dependency extraction in the self-update engine (`src/updater/`).
 - Prevent runaway background update check spawns during offline conditions or GitHub API outages by immediately recording check attempt timestamps and ensuring cache update upon API failures.
