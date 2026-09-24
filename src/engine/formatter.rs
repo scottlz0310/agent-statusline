@@ -341,10 +341,15 @@ mod tests {
 
     #[test]
     fn test_render_template_custom_layout() {
-        let mut config = Config::default();
-        config.format = "$model\n$directory".to_string();
-        config.model.format = "MODEL: [$model]($style)".to_string();
-        config.model.style = "cyan".to_string();
+        let config = Config {
+            format: "$model\n$directory".to_string(),
+            model: crate::engine::config::ModelConfig {
+                format: "MODEL: [$model]($style)".to_string(),
+                style: "cyan".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let state = StatuslineState {
             cwd: PathBuf::from("/home/user/project"),

@@ -15,5 +15,8 @@ targets = ["aarch64-unknown-linux-musl", "x86_64-pc-windows-msvc", "x86_64-unkno
 install-path = ["$LOCALAPPDATA/Programs/agent-statusline", "~/.local/bin"]
 # Where to host releases
 hosting = "github"
+# Archive format for each platform (use zip uniformly for zero-dependency extraction)
+unix-archive = ".zip"
+windows-archive = ".zip"
 # Whether to install an updater program
 install-updater = false

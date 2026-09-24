@@ -67,7 +67,19 @@ pub enum Commands {
     Status,
 
     /// Self-update binary to the latest GitHub Release
-    Update,
+    Update {
+        /// Only check for updates without installing
+        #[arg(long)]
+        check: bool,
+
+        /// Force re-installation even if already on the latest version
+        #[arg(long)]
+        force: bool,
+
+        /// Background check mode (quietly update cache only)
+        #[arg(long, hide = true)]
+        background: bool,
+    },
 
     /// Output shell integration script
     Init {
