@@ -103,7 +103,7 @@ agent-statusline/
 | :--- | :--- | :--- |
 | **`agy`** | `~/.gemini/antigravity-cli/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent agy", "enabled": true }` |
 | **`claude`** | `~/.claude/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent claude" }` |
-| **`copilot`** | `~/.copilot/config.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent copilot" }` |
+| **`copilot`** | `~/.copilot/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent copilot" }` |
 
 ### 4.2 インストーラーコマンド体系
 
