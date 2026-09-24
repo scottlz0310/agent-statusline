@@ -5,6 +5,7 @@ mod installer;
 mod model;
 mod modules;
 mod sink;
+mod updater;
 
 use std::io::{self, Read};
 
@@ -23,6 +24,10 @@ use installer::{
 use sink::notifier::write_ratelimit_status;
 
 fn main() -> io::Result<()> {
+    if let Ok(exe) = std::env::current_exe() {
+        updater::clean_old_executable(&exe);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -46,10 +51,11 @@ fn main() -> io::Result<()> {
             cmd_status();
             Ok(())
         }
-        Commands::Update => {
-            println!("Update subcommand (Phase 4): self-update to latest release");
-            Ok(())
-        }
+        Commands::Update {
+            check,
+            force,
+            background,
+        } => updater::run_update(check, force, background),
         Commands::Init { shell } => {
             println!("Init subcommand (Phase 4): shell={shell:?}");
             Ok(())
@@ -64,6 +70,10 @@ fn cmd_render(
     bench: bool,
 ) -> io::Result<()> {
     let start = std::time::Instant::now();
+
+    // 24時間非同期バックグラウンド更新チェック（キャッシュ確認 0ms）
+    updater::check_update_background_if_needed();
+
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
 
