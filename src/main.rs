@@ -86,10 +86,8 @@ fn cmd_render(
         && let Some(payload) = ratelimit_payload
     {
         if let Some(custom_dir) = &config.integrations.squirrel_notifier.output_dir {
-            let _ = sink::notifier::write_ratelimit_status_to_dir(
-                &payload,
-                std::path::Path::new(custom_dir),
-            );
+            let expanded_path = sink::notifier::expand_env_path(custom_dir);
+            let _ = sink::notifier::write_ratelimit_status_to_dir(&payload, &expanded_path);
         } else {
             let _ = write_ratelimit_status(&payload);
         }

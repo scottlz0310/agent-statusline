@@ -31,26 +31,36 @@ pub fn render_directory(
         .replace("$path", &short_path)
 }
 
-pub fn render_git_branch(cfg: &GitBranchConfig, state: &StatuslineState) -> String {
+pub fn render_git_branch(
+    cfg: &GitBranchConfig,
+    git: Option<&crate::modules::git::GitStatus>,
+) -> String {
     if cfg.disabled {
         return String::new();
     }
-    let git = get_git_status(&state.cwd);
-    let Some(branch) = git.branch else {
+    let Some(git) = git else {
+        return String::new();
+    };
+    let Some(branch) = &git.branch else {
         return String::new();
     };
 
     cfg.format
         .replace("$symbol", &cfg.symbol)
-        .replace("$branch", &branch)
+        .replace("$branch", branch)
         .replace("$style", &cfg.style)
 }
 
-pub fn render_git_status(cfg: &GitStatusConfig, state: &StatuslineState) -> String {
+pub fn render_git_status(
+    cfg: &GitStatusConfig,
+    git: Option<&crate::modules::git::GitStatus>,
+) -> String {
     if cfg.disabled {
         return String::new();
     }
-    let git = get_git_status(&state.cwd);
+    let Some(git) = git else {
+        return String::new();
+    };
     if !git.is_dirty {
         return String::new();
     }
@@ -192,17 +202,68 @@ pub fn render_quota(cfg: &QuotaConfig, state: &StatuslineState) -> String {
 
 /// 設定テンプレートに従ってステータスラインを描画する
 pub fn render_template(config: &Config, state: &StatuslineState, terminal_width: usize) -> String {
-    let dir_str = render_directory(&config.directory, state, terminal_width);
-    let branch_str = render_git_branch(&config.git_branch, state);
-    let git_status_str = render_git_status(&config.git_status, state);
-    let sandbox_str = render_sandbox(&config.sandbox, state);
+    let dir_str = if config.format.contains("$directory") {
+        render_directory(&config.directory, state, terminal_width)
+    } else {
+        String::new()
+    };
 
-    let model_str = render_model(&config.model, state);
-    let context_str = render_context(&config.context, state);
-    let agent_state_str = render_agent_state(&config.agent_state, state);
-    let plan_str = render_plan(&config.plan, state);
+    let needs_git = (config.format.contains("$git_branch") && !config.git_branch.disabled)
+        || (config.format.contains("$git_status") && !config.git_status.disabled);
 
-    let quota_str = render_quota(&config.quota, state);
+    let git_status = if needs_git {
+        Some(get_git_status(&state.cwd))
+    } else {
+        None
+    };
+
+    let branch_str = if config.format.contains("$git_branch") {
+        render_git_branch(&config.git_branch, git_status.as_ref())
+    } else {
+        String::new()
+    };
+
+    let git_status_str = if config.format.contains("$git_status") {
+        render_git_status(&config.git_status, git_status.as_ref())
+    } else {
+        String::new()
+    };
+
+    let sandbox_str = if config.format.contains("$sandbox") {
+        render_sandbox(&config.sandbox, state)
+    } else {
+        String::new()
+    };
+
+    let model_str = if config.format.contains("$model") {
+        render_model(&config.model, state)
+    } else {
+        String::new()
+    };
+
+    let context_str = if config.format.contains("$context") {
+        render_context(&config.context, state)
+    } else {
+        String::new()
+    };
+
+    let agent_state_str = if config.format.contains("$agent_state") {
+        render_agent_state(&config.agent_state, state)
+    } else {
+        String::new()
+    };
+
+    let plan_str = if config.format.contains("$plan") {
+        render_plan(&config.plan, state)
+    } else {
+        String::new()
+    };
+
+    let quota_str = if config.format.contains("$quota") {
+        render_quota(&config.quota, state)
+    } else {
+        String::new()
+    };
 
     let mut output_lines = Vec::new();
 
