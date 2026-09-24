@@ -32,8 +32,9 @@
 - [x] GitHub Actions ワークフロー (`ci.yml`: fmt, clippy, test, llvm-cov)
 - [x] Codecov によるテストカバレッジ計測・レポート設定 (`codecov.yml` 初期配置: Informative モード) (#9)
 - [x] エントリポイントコードビハインド行数ラチェット監視の実装 (`scripts/check-code-behind-size.ps1`) (#9)
-- [ ] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化
+- [x] Lefthook Git フックの設定 (`lefthook.yml`: fmt, clippy, code-behind-size, test)
+- [x] Renovate 設定 (`renovate.json`) の整備
 - [ ] `cargo-dist` の設定とリリースクロスビルドワークフロー (`release.yml`)
 - [ ] 自己更新サブコマンド (`update`) & バックグラウンド更新チェックの実装
-- [ ] Renovate 設定 (`renovate.json`) の整備
+- [ ] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化
 - [ ] ドキュメントの最終整備とリリース準備
