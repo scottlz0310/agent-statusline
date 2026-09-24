@@ -83,21 +83,40 @@ try {
     }
 
     $binDest = Join-Path $InstallDir "agent-statusline.exe"
+    $binStage = Join-Path $InstallDir "agent-statusline.exe.new"
+    $oldDest = Join-Path $InstallDir "agent-statusline.exe.old"
 
-    # If destination exe exists and is running/locked, rename it to .old
-    if (Test-Path -Path $binDest) {
-        $oldDest = Join-Path $InstallDir "agent-statusline.exe.old"
-        if (Test-Path -Path $oldDest) {
-            Remove-Item -Path $oldDest -Force -ErrorAction SilentlyContinue
-        }
-        try {
+    # Stage new binary in destination directory first to ensure disk space and write permissions
+    if (Test-Path -Path $binStage) {
+        Remove-Item -Path $binStage -Force -ErrorAction SilentlyContinue
+    }
+    Copy-Item -Path $binSource -Destination $binStage -Force
+
+    $backedUpExisting = $false
+    try {
+        # If destination exe exists and is running/locked, rename it to .old
+        if (Test-Path -Path $binDest) {
+            if (Test-Path -Path $oldDest) {
+                Remove-Item -Path $oldDest -Force -ErrorAction SilentlyContinue
+            }
             Move-Item -Path $binDest -Destination $oldDest -Force
-        } catch {
-            Write-Warning "Could not rename existing binary: $_"
+            $backedUpExisting = $true
+        }
+
+        # Activate the staged binary
+        Move-Item -Path $binStage -Destination $binDest -Force
+    } catch {
+        # Rollback: restore .old if new binary activation failed
+        if ($backedUpExisting -and (Test-Path -Path $oldDest) -and (-not (Test-Path -Path $binDest))) {
+            Move-Item -Path $oldDest -Destination $binDest -Force -ErrorAction SilentlyContinue
+        }
+        throw "Failed to replace agent-statusline.exe: $_"
+    } finally {
+        if (Test-Path -Path $binStage) {
+            Remove-Item -Path $binStage -Force -ErrorAction SilentlyContinue
         }
     }
 
-    Copy-Item -Path $binSource -Destination $binDest -Force
     Write-Host "Installed agent-statusline.exe to $InstallDir" -ForegroundColor Green
 
     # 3. Add to User PATH if not already present
