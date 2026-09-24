@@ -81,10 +81,13 @@ agent-statusline render --agent copilot
 本リポジトリではコミット前・プッシュ前の品質検査に [Lefthook](https://github.com/evilmartians/lefthook) を採用しています。初回クローン時にフックを有効化してください。
 
 ```bash
-# Lefthook CLI のインストール (例: winget, cargo, homebrew)
+# Lefthook CLI のインストール
+# Windows (winget)
 winget install evilmartians.lefthook
-# または
-cargo install lefthook
+# macOS / Linux (Homebrew)
+brew install lefthook
+# または Go
+go install github.com/evilmartians/lefthook@latest
 
 # Git フックの登録
 lefthook install
