@@ -16,7 +16,12 @@ pub fn get_git_status(path: &Path) -> GitStatus {
         .head_name()
         .ok()
         .flatten()
-        .map(|name| name.shorten().to_string());
+        .map(|name| name.shorten().to_string())
+        .or_else(|| {
+            repo.head_id()
+                .ok()
+                .map(|id| id.to_hex_with_len(7).to_string())
+        });
 
     // 簡易 dirty 判定 (高速性を最優先)
     let is_dirty = repo.is_dirty().unwrap_or(false);
@@ -32,11 +37,8 @@ mod tests {
     fn test_get_git_status_in_repo() {
         let status = get_git_status(Path::new("."));
         assert!(status.branch.is_some());
-        // 現在のブランチは feat/phase1-core-render-poc
-        assert_eq!(
-            status.branch.as_deref(),
-            Some("feat/phase1-core-render-poc")
-        );
+        let b = status.branch.unwrap();
+        assert!(!b.is_empty());
     }
 
     #[test]
