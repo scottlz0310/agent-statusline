@@ -23,10 +23,10 @@
 - [x] 一時ディレクトリを用いたインストーラーの単体・結合テスト
 
 ## Phase 3: Starship ライクな TOML 設定エンジン (`config.toml`)
-- [ ] TOML 設定スキーマの実装 (`config.rs`)
-- [ ] テンプレート変数展開エンジン (`formatter.rs`)
-- [ ] インラインスタイル構文 (`[text](style)`) の ANSI 変換エンジン (`style.rs`)
-- [ ] ユーザー設定ファイルの読み込みとゼロコンフィグフォールバック
+- [x] TOML 設定スキーマの実装 (`config.rs`)
+- [x] テンプレート変数展開エンジン (`formatter.rs`)
+- [x] インラインスタイル構文 (`[text](style)`) の ANSI 変換エンジン (`style.rs`)
+- [x] ユーザー設定ファイルの読み込みとゼロコンフィグフォールバック
 
 ## Phase 4: CI/CD・自動配布・品質保証
 - [ ] GitHub Actions ワークフロー (`ci.yml`: fmt, clippy, test)
