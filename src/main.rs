@@ -10,7 +10,7 @@ mod updater;
 use std::io::{self, Read};
 
 use clap::Parser;
-use cli::{AgentKind, Cli, Commands, ShellKind};
+use cli::{AgentKind, Cli, Commands};
 
 use adapter::StatuslineAdapter;
 use adapter::agy::AntigravityAdapter;
@@ -35,8 +35,7 @@ fn main() -> io::Result<()> {
             agent,
             config,
             bench,
-            shell,
-        } => cmd_render(agent, shell, config.as_deref(), bench),
+        } => cmd_render(agent, config.as_deref(), bench),
         Commands::Install {
             agent,
             all,
@@ -56,16 +55,11 @@ fn main() -> io::Result<()> {
             force,
             background,
         } => updater::run_update(check, force, background),
-        Commands::Init { shell } => {
-            println!("Init subcommand (Phase 4): shell={shell:?}");
-            Ok(())
-        }
     }
 }
 
 fn cmd_render(
     agent: AgentKind,
-    _shell: ShellKind,
     config_path: Option<&std::path::Path>,
     bench: bool,
 ) -> io::Result<()> {

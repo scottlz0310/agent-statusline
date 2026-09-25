@@ -20,10 +20,6 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value = "agy")]
         agent: AgentKind,
 
-        /// Shell type for ANSI escaping (pwsh, bash)
-        #[arg(short, long, value_enum, default_value = "pwsh")]
-        shell: ShellKind,
-
         /// Path to custom config file
         #[arg(short, long)]
         config: Option<std::path::PathBuf>,
@@ -80,12 +76,6 @@ pub enum Commands {
         #[arg(long, hide = true)]
         background: bool,
     },
-
-    /// Output shell integration script
-    Init {
-        #[arg(value_enum)]
-        shell: ShellKind,
-    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -121,10 +111,4 @@ impl std::fmt::Display for AgentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShellKind {
-    Pwsh,
-    Bash,
 }
