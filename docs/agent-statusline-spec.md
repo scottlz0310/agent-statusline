@@ -1,13 +1,11 @@
-# agent-statusline 設計構想仕様書
+# agent-statusline 設計・機能仕様書
 
 ## 1. 背景と課題意識
 
-* **現状の課題**:  
-  * AIコーディングエージェント（Antigravity CLI, Claude Code, GitHub Copilot CLI 等）のステータスライン描画において、シェルスクリプト（特に Windows 環境での `Git Bash` / `sh` 経由）を用いると、1回の描画ごとに多数の外部プロセス（`sh`, `jq`, `git`, `date`, コアユーティリティ等）が直列起動される。  
-  * Windows / PowerShell（`pwsh`）環境ではプロセス生成（fork/exec）コストが極めて高く、数十回のプロセス呼び出しが数百ミリ秒〜数秒（高負荷時十数秒）のレイテンシを引き起こし、エージェント側のタイムアウト制限（通常 1〜2 秒程度）を超過して強制終了・自動無効化エラーが頻発する。  
+* **現状の課題**: シェルスクリプト方式では、描画のたびに git や JSON 処理などの外部コマンドを起動するため、環境によって表示遅延やクライアント側のタイムアウトにつながる。
 * **解決策**:  
   * 全処理（標準入力 JSON パース、Git 状態検出、時刻・クォータ計算、ローカル連携ファイル出力、ANSI 文字列生成）を **単一の Rust ネイティブバイナリ** に集約。  
-  * 外部プロセスの生成回数を「ゼロ」にし、実行レイテンシを **1〜3ms 程度** へ短縮してタイムアウトを完全解消する。  
+  * 描画処理で `git` などの外部 CLI を起動せず、起動コストを抑える。実行時間は環境に依存するため、`render --bench` で計測する。
   * **3 大主要 CLI クライアント（Antigravity CLI, Claude Code, GitHub Copilot CLI）** を第一級市民として標準サポート。  
   * `Mcp-Docker` の設計モデルを踏襲した **クライアント設定自動インストーラー（`install` / `uninstall` / `status`）** を備え、ユーザー環境への安全な導入を自動化する。  
   * `cargo-dist` を用いた自動クロスコンパイルとワンライナーインストーラーにより、複数マシンへの配布・更新を自動化する。  
@@ -17,14 +15,14 @@
 
 ## 2. コア設計方針
 
-1. **ゼロ・プロセス・オーバーヘッド (Zero Fork/Exec)**:  
-   * 外部 CLI コマンド（`git.exe`, `jq.exe`, `date.exe` 等）は一切呼ばず、全て Rust クレートのインプロセス実行で完結させる（Git 操作は `gix`、時刻計算は `chrono`、JSON 操作は `serde_json`）。  
+1. **描画経路で外部 CLI を起動しない**:
+   * Git 操作は `gix`、時刻計算は `chrono`、JSON 操作は `serde_json` で行う。24 時間ごとのバックグラウンド更新確認では同じ実行ファイルを起動する（6.3 節）。
 2. **3 大クライアントの統合サポート**:  
    * Antigravity CLI (`agy`)、Claude Code (`claude`)、GitHub Copilot CLI (`copilot`) の入力 JSON スキーマの違いを `Adapter` 層で吸収し、単一バイナリでシームレスに処理。
 3. **Mcp-Docker 方式の安全なクライアント設定自動化**:  
    * 各エージェントの設定ファイル（`settings.json` / `config.json` 等）のパスを自動解決し、既存設定やコメントを破壊せずに statusline 登録・解除・診断を行う。
-4. **pwsh ファースト ＋ bash サポート**:  
-   * メイン環境である PowerShell 7（Windows）で最もストレスなく動くよう最適化しつつ、bash（WSL/Linux）向けのエスケープ文字幅対策（`\[...\]` / `\x01...\x02`）も切り替え可能とする。  
+4. **複数 OS のネイティブ実行**:
+   * Windows、Linux 向けのネイティブバイナリを配布する。シェル固有のプロンプト幅制御は実装せず、端末向け ANSI 出力を行う。
 5. **Starship ライクなメンタルモデル**:  
    * TOML による宣言的レイアウト設定（`format = "$directory$git_branch..."`）とインラインスタイル指定記法（`[text](style)`）を採用し、既存ツールからの学習コストを最小化。  
 6. **ゼロコンフィグで動作**:  
@@ -34,43 +32,22 @@
 
 ## 3. システムアーキテクチャ
 
-### 3.1 内部モジュール構成
+### 3.1 実装済みモジュール構成
+
+実際のソース構成は次のとおりです。テストは各モジュール内に配置しています。
 
 ```text
-agent-statusline/
-├── Cargo.toml
-├── src/
-│   ├── main.rs                  # CLI エントリポイント (clap: render, install, uninstall, status)
-│   ├── cli.rs                   # コマンドライン引数定義
-│   ├── adapter/                 # 各エージェント入力 JSON の内部共通型への変換
-│   │   ├── mod.rs               # StatuslineAdapter トレイト
-│   │   ├── agy.rs               # Antigravity CLI (agy) 用アダプター
-│   │   ├── claude.rs            # Claude Code 用アダプター
-│   │   └── copilot.rs           # GitHub Copilot CLI 用アダプター
-│   ├── model/                   # 内部正規化データ構造
-│   │   ├── state.rs             # ディレクトリ、モデル、コンテキスト、クォータ等
-│   │   └── ratelimit.rs         # Squirrel Notifier 向けレートリミット外部通知スキーマ
-│   ├── modules/                 # 各セグメントの情報抽出ロジック (インプロセス)
-│   │   ├── directory.rs         # パス短縮 (中間省略ロジック)
-│   │   ├── git.rs               # gix によるブランチ & dirty 状態検出
-│   │   ├── model.rs             # 使用モデル名 & effort
-│   │   ├── context.rs           # トークン数 (k短縮) & Ctx 使用率
-│   │   ├── quota.rs             # レートリミット残時間・使用率計算
-│   │   └── sandbox.rs           # サンドボックス状態表示
-│   ├── engine/                  # Starship 風フォーマット展開 & スタイル適用
-│   │   ├── config.rs            # TOML 設定パース & デフォルト設定定義
-│   │   ├── formatter.rs         # テンプレート変数展開 ($directory 等)
-│   │   └── style.rs             # ANSI カラー装飾 & シェルエスケープ
-│   ├── installer/               # クライアント設定自動化 (Mcp-Docker モデル)
-│   │   ├── mod.rs               # ClientInstaller トレイト
-│   │   ├── client.rs            # クライアント識別・設定ファイルパス解決
-│   │   └── patcher.rs           # JSON 設定ファイルの安全な更新・バックアップ
-│   └── sink/                    # 出力先ハンドリング
-│       ├── terminal.rs          # ANSI エスケープによる stdout 出力
-│       └── notifier.rs          # Squirrel Notifier 用 ratelimit-status (JSON) の原子的書き出し
-└── tests/                       # 統合テスト (実 JSON 入力による回帰テスト)
+src/
+├── main.rs
+├── cli.rs
+├── adapter/       # agy、claude、copilot の入力変換
+├── model/         # 共通状態と Squirrel Notifier スキーマ
+├── modules/       # context、directory、git、quota
+├── engine/        # TOML 設定、テンプレート、ANSI スタイル
+├── installer/     # クライアント設定の install / uninstall / status
+├── sink/          # Squirrel Notifier JSON の原子的書き出し
+└── updater/       # GitHub Release 確認とバイナリ更新
 ```
-
 ### 3.2 処理シーケンス (`render` コマンド実行時)
 
 ```text
@@ -81,17 +58,19 @@ agent-statusline/
   ├─ 1. stdin を一括読み込み (read_to_string)
   ├─ 2. 設定読み込み (config.toml / デフォルトフォールバック)
   ├─ 3. Adapter::parse() で内部共通型 StatuslineState へデシリアライズ
-  ├─ 4. インプロセス情報取得 (ゼロ・外部プロセス)
-  │      ├─ gix による .git 探索 & dirty 判定 (< 1ms)
-  │      ├─ chrono / 内部算術によるクォータ reset_time 差分計算 (0ms)
+  ├─ 4. Rust ライブラリによる情報取得
+  │      ├─ gix による Git ブランチ・変更状態の取得
+  │      ├─ chrono / 内部算術によるクォータ reset_time 差分計算
   │      └─ terminal_size によるターミナル幅取得
   ├─ 5. Sink 処理 (原子的ファイル書き出し)
-  │      └─ %LOCALAPPDATA%/SquirrelNotifier/ratelimit-status/<agent>.json
+  │      └─ OS のローカルデータディレクトリ/SquirrelNotifier/ratelimit-status/<agent>.json
   │         (一時ファイル書き出し + 原子的 rename)
   ├─ 6. Format Engine
   │      └─ Starship 風テンプレートに変数をバインドし、ANSI 装飾を付与
-  └─ 7. stdout へフラッシュ (全体で 1〜3ms 以内に終了)
+  └─ 7. stdout へ出力
 ```
+
+更新確認の期限を過ぎている場合、描画処理は同じ実行ファイルの `update --background` を起動して確認を委譲します。通常の描画時間は `render --bench` で利用環境ごとに測定します。
 
 ---
 
@@ -190,7 +169,7 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
 
 ## 6. 自動配布・リリースパイプライン
 
-### 6.1 ビルド・配布構成 (`cargo-dist`)
+### 6.1 現在のビルド・配布構成 (`cargo-dist`)
 
 * **ビルドターゲット**:  
   * `x86_64-pc-windows-msvc` (Windows / pwsh 用ネイティブ exe)  
@@ -207,39 +186,29 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
 
 ### 6.3 自己更新・自動アップデート機構 (`agent-statusline update`)
 
-Claude Code と同等のゼロ・ダウンタイム自動更新機構を備えます。
+GitHub Release からバイナリを取得し、インストール済みバイナリを更新します。公開 Release がない間は、更新確認と更新操作は利用できません。
 
 1. **実行中バイナリの安全な置換 (Windows 対応)**:
    - Windows では実行中の `.exe` ファイルは直接上書き・削除できませんが、**リネーム（移動）は許可**されています。
    - `update` 実行時、現在のバイナリ（`agent-statusline.exe`）を一時ファイル（`agent-statusline.exe.old`）にリネームした上で、GitHub Releases からダウンロードした最新バイナリを `agent-statusline.exe` として配置します。
    - 現在のプロセスは無停止で終了し、**次回エージェントが statusline を呼び出した瞬間から新バージョンが即座に起動**します（`.old` は次回起動時に自動クリーンアップ）。
-2. **24時間非同期バックグラウンドチェック (Zero-Latency)**:
-   - `render` 実行時はキャッシュファイル（`~/.cache/agent-statusline/update_check.json`）のタイムスタンプのみをチェック（0ms）。
+2. **24時間ごとのバックグラウンドチェック**:
+   - `render` 実行時は OS の cache directory 内にある `agent-statusline/update_check.json` のタイムスタンプを確認します。
    - 24 時間以上経過している場合のみ、バックグラウンドで非同期プロセスをスポーンして GitHub Releases API に最新タグを問い合わせます。
-   - `render` の描画速度（1〜3ms）には一切干渉しません。
+   - 更新チェックの通信はバックグラウンド処理で行い、描画処理とは分離します。
 
 ---
 
-## 7. 開発ロードマップ
+## 7. 実装状況と初回リリース準備
 
-- [ ] **Phase 1: コア機能 & 3 クライアント Adapter 実装 (PoC)**
-  - [ ] プロジェクト基盤の初期化（`Cargo.toml`, `.gitignore`, `tasks.md`, `CHANGELOG.md`）
-  - [ ] 共通モデル（`StatuslineState`, `RatelimitStatus`）と `StatuslineAdapter` トレイト
-  - [ ] `agy`, `claude`, `copilot` 用アダプター実装
-  - [ ] `gix` による Git ブランチ・dirty 状態の高速インプロセス検出
-  - [ ] クォータ残時間計算（内部算術 / `chrono`）
-  - [ ] Squirrel Notifier 向け原子的 JSON 出力
-  - [ ] デフォルト 3 行 ANSI レンダリング（実行時間 1〜3ms の実証）
-- [ ] **Phase 2: クライアント設定自動化（`install` / `uninstall` / `status`）**
-  - [ ] 各エージェント設定ファイルパスの自動解決
-  - [ ] `settings.json` / `config.json` の安全な更新（バックアップ、既存キー保護）
-  - [ ] `agent-statusline install`, `uninstall`, `status` コマンドの実装
-- [ ] **Phase 3: Starship ライクな TOML 設定エンジン (`config.toml`)**
-  - [ ] TOML パーサーの実装
-  - [ ] テンプレート変数展開エンジン（`$directory`, `$quota` 等）
-  - [ ] インラインスタイル構文（`[text](style)`）の ANSI 変換器
-- [ ] **Phase 4: CI/CD・自動配布・品質保証**
-  - [ ] GitHub Actions ワークフロー（`cargo fmt`, `cargo clippy`, `cargo test`）
-  - [ ] `cargo-dist` の導入と自動リリースパイプライン
-  - [ ] 自己更新サブコマンド (`agent-statusline update`) & バックグラウンド更新チェックの実装
-  - [ ] Renovate 連携（`scottlz0310/renovate-config`）
+コア機能、3 クライアント対応、設定自動化、TOML 設定、CI、配布ワークフローは実装済みです。タスク一覧は [tasks.md](../tasks.md) を参照してください。
+
+### 7.1 初回リリース手順
+
+現時点では Git tag と GitHub Release はまだありません。初回リリース時は次の手順を行います。
+
+1. `Cargo.toml` のバージョンと `CHANGELOG.md` のリリース内容・日付を確定する。
+2. `Cargo.lock` を更新し、変更を `main` にマージする。
+3. `Cargo.toml` と一致する SemVer タグ（例: `v0.1.0`）を push する。
+4. `Release` workflow の完了後、GitHub Release に Windows x64、Linux x64 musl、Linux ARM64 musl の ZIP、チェックサム、installer があることを確認する。
+5. Windows installer で初回バージョンをインストールした後、`agent-statusline update --force` を実行して、同一バージョンの Release asset を取得・置換できることを確認してから、初回リリースを利用者へ案内する。
