@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- README に GitHub Release と `cargo install` それぞれのアンインストール手順を追加し、Linux の receipt、env helper の読み込み行、更新確認キャッシュの削除を記載。
+- README に Windows での PowerShell インストーラーの Defender 検出事例と、Cargo インストールでの検証結果を追記。
+
 ## [0.1.0] - 2026-09-26
 
 ### Changed

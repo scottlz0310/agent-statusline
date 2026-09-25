@@ -28,16 +28,20 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステー�
 
 ### GitHub Release からインストール
 
-初回リリース公開後、Windows では次のコマンドでインストールできます。現在は GitHub Release がまだ公開されていないため、この方法は利用できません。
+Windows では、最新の GitHub Release に含まれる PowerShell インストーラーを次のコマンドで実行できます。
 
 ```powershell
 irm https://github.com/scottlz0310/agent-statusline/releases/latest/download/agent-statusline-installer.ps1 | iex
 ```
 
-Rust toolchain がある場合は、リポジトリからインストールできます。
+#### Windows Defender に関する注意
+
+Windows の検証環境で上記コマンドを実行した際、Microsoft Defender が `Trojan:Win32/Commando!ml` を検出しました。検出対象として表示されたのは PowerShell のコマンド実行です。実行ファイル自体が検出対象だったとは確認されておらず、誤検知かどうかも判断していません。
+
+同じ環境では、Rust toolchain を使ってソースからインストールした場合、この検出は発生せず、Antigravity CLI、Claude Code、GitHub Copilot CLI の3クライアントで動作を確認しました。この結果は検証した環境でのものです。Cargo の利用には Rust toolchain が必要です。
 
 ```bash
-cargo install --git https://github.com/scottlz0310/agent-statusline --locked
+cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.1.0 --locked
 ```
 
 ### リリース公開後のバイナリ更新
@@ -58,6 +62,67 @@ agent-statusline install --agent agy,claude
 
 # 設定状態の診断
 agent-statusline status
+```
+
+## アンインストール
+
+最初に、対応クライアントの設定から statusline 登録を解除します。以前の独自 statusline 設定がバックアップされている場合は復元されます。
+
+```bash
+agent-statusline uninstall --all
+```
+
+このコマンドはクライアント設定を変更しますが、バイナリは削除しません。バイナリはインストール方法に応じて削除してください。
+
+### GitHub Release からインストールした場合
+
+Windows では、インストール先のディレクトリを削除します。
+
+```powershell
+$installDir = Join-Path $env:LOCALAPPDATA 'Programs\agent-statusline'
+$appDataDir = Join-Path $env:LOCALAPPDATA 'agent-statusline'
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath) {
+    $pathEntries = $userPath -split ';' | Where-Object {
+        $_.TrimEnd('\') -ine $installDir.TrimEnd('\')
+    }
+    [Environment]::SetEnvironmentVariable('Path', ($pathEntries -join ';'), 'User')
+}
+
+if (Test-Path -LiteralPath $installDir) {
+    Remove-Item -LiteralPath $installDir -Recurse -Force
+}
+
+foreach ($fileName in 'agent-statusline-receipt.json', 'update_check.json') {
+    $file = Join-Path $appDataDir $fileName
+    if (Test-Path -LiteralPath $file) {
+        Remove-Item -LiteralPath $file -Force
+    }
+}
+
+if ((Test-Path -LiteralPath $appDataDir) -and -not (Get-ChildItem -LiteralPath $appDataDir -Force | Select-Object -First 1)) {
+    Remove-Item -LiteralPath $appDataDir -Force
+}
+```
+
+この処理はユーザー環境変数 `Path` からインストール先だけを取り除き、cargo-dist の receipt と更新確認キャッシュを削除します。反映を確認するには PowerShell を開き直してください。`%APPDATA%\agent-statusline\config.toml` のユーザー設定と、各クライアント設定の `.bak` は確認後に必要に応じて削除してください。
+
+Linux では、インストール先のバイナリ、cargo-dist の install receipt、更新確認キャッシュを削除します。cargo-dist 0.33.0 は flat install の場合に `env` ヘルパーも設定ディレクトリへ配置します。`~/.profile` などのシェル設定ファイルからこのヘルパーを読み込む行（`. <env-path>` 形式）と、インストーラーが追加した `~/.local/bin` の PATH 設定行を削除してください。
+
+```bash
+rm -f ~/.local/bin/agent-statusline
+rm -f ~/.config/agent-statusline/agent-statusline-receipt.json
+rm -f ~/.config/agent-statusline/env
+rm -f ~/.cache/agent-statusline/update_check.json
+```
+
+上記は XDG の標準保存先を使う場合のパスです。`XDG_CONFIG_HOME` または `XDG_CACHE_HOME` を設定している場合は、それぞれの保存先に読み替えてください。`~/.config/agent-statusline/config.toml` など独自設定は削除されません。
+
+### `cargo install` でインストールした場合
+
+```bash
+cargo uninstall agent-statusline
 ```
 
 ### ステータスラインの実行 (エージェントから自動呼出)
