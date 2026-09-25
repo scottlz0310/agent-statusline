@@ -108,11 +108,16 @@ if ((Test-Path -LiteralPath $appDataDir) -and -not (Get-ChildItem -LiteralPath $
 
 この処理はユーザー環境変数 `Path` からインストール先だけを取り除き、cargo-dist の receipt と更新確認キャッシュを削除します。反映を確認するには PowerShell を開き直してください。`%APPDATA%\agent-statusline\config.toml` のユーザー設定と、各クライアント設定の `.bak` は確認後に必要に応じて削除してください。
 
-Linux では、インストール先のバイナリを削除します。インストーラーがシェル設定ファイルに `~/.local/bin` の PATH 設定を追加した場合は、その設定も削除してください。
+Linux では、インストール先のバイナリ、cargo-dist の install receipt、更新確認キャッシュを削除します。cargo-dist 0.33.0 は flat install の場合に `env` ヘルパーも設定ディレクトリへ配置します。インストーラーがシェル設定ファイルに `~/.local/bin` の PATH 設定を追加した場合は、その設定も削除してください。
 
 ```bash
-rm ~/.local/bin/agent-statusline
+rm -f ~/.local/bin/agent-statusline
+rm -f ~/.config/agent-statusline/agent-statusline-receipt.json
+rm -f ~/.config/agent-statusline/env
+rm -f ~/.cache/agent-statusline/update_check.json
 ```
+
+上記は XDG の標準保存先を使う場合のパスです。`XDG_CONFIG_HOME` または `XDG_CACHE_HOME` を設定している場合は、それぞれの保存先に読み替えてください。`~/.config/agent-statusline/config.toml` など独自設定は削除されません。
 
 ### `cargo install` でインストールした場合
 
