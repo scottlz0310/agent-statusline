@@ -211,4 +211,4 @@ GitHub Release からバイナリを取得し、インストール済みバイ�
 2. `Cargo.lock` を更新し、変更を `main` にマージする。
 3. `Cargo.toml` と一致する SemVer タグ（例: `v0.1.0`）を push する。
 4. `Release` workflow の完了後、GitHub Release に Windows x64、Linux x64 musl、Linux ARM64 musl の ZIP、チェックサム、installer があることを確認する。
-5. Windows installer と `agent-statusline update` が Release assets を取得できることを確認してから、初回リリースを利用者へ案内する。
+5. Windows installer で初回バージョンをインストールした後、`agent-statusline update --force` を実行して、同一バージョンの Release asset を取得・置換できることを確認してから、初回リリースを利用者へ案内する。

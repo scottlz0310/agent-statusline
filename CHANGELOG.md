@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- README と設計仕様書を現在の実装に合わせ、初回リリースの準備手順を追加。
+- README と設計仕様書を現在の実装に合わせ、初回リリース時の `agent-statusline update --force` による asset 取得確認を明記。
 
 ### Added
 - Self-update subcommand (`agent-statusline update`) with `--check` and `--force` flags, supporting zero-downtime in-process binary replacement with atomic staging (`.new`), `.old` backup, and rollback protection on failure.
