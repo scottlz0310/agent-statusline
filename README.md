@@ -108,7 +108,7 @@ if ((Test-Path -LiteralPath $appDataDir) -and -not (Get-ChildItem -LiteralPath $
 
 この処理はユーザー環境変数 `Path` からインストール先だけを取り除き、cargo-dist の receipt と更新確認キャッシュを削除します。反映を確認するには PowerShell を開き直してください。`%APPDATA%\agent-statusline\config.toml` のユーザー設定と、各クライアント設定の `.bak` は確認後に必要に応じて削除してください。
 
-Linux では、インストール先のバイナリ、cargo-dist の install receipt、更新確認キャッシュを削除します。cargo-dist 0.33.0 は flat install の場合に `env` ヘルパーも設定ディレクトリへ配置します。インストーラーがシェル設定ファイルに `~/.local/bin` の PATH 設定を追加した場合は、その設定も削除してください。
+Linux では、インストール先のバイナリ、cargo-dist の install receipt、更新確認キャッシュを削除します。cargo-dist 0.33.0 は flat install の場合に `env` ヘルパーも設定ディレクトリへ配置します。`~/.profile` などのシェル設定ファイルからこのヘルパーを読み込む行（`. <env-path>` 形式）と、インストーラーが追加した `~/.local/bin` の PATH 設定行を削除してください。
 
 ```bash
 rm -f ~/.local/bin/agent-statusline
