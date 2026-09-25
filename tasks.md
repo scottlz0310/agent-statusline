@@ -37,5 +37,5 @@
 - [x] `cargo-dist` の設定とリリースクロスビルドワークフロー (`release.yml`)
 - [x] 自己更新サブコマンド (`update`) & バックグラウンド更新チェックの実装
 - [x] 未使用スケルトン (`Commands::Init`, `--shell`, `ShellKind`) の完全削除とコードビハインド行数ラチェット引き締め
-- [ ] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化
+- [x] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化 (`codecov.yml`: target 80%, threshold 2%/5%, informational: false) (#9)
 - [ ] ドキュメントの最終整備とリリース準備
