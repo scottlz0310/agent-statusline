@@ -11,11 +11,17 @@ coverage:
   status:
     project:
       default:
-        informational: true
+        target: 80%
+        threshold: 2%
+        informational: false
+        if_ci_failed: error
 
     patch:
       default:
-        informational: true
+        target: 80%
+        threshold: 5%
+        informational: false
+        if_ci_failed: error
 
   ignore:
     - "src/main.rs"
