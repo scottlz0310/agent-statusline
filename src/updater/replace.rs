@@ -31,6 +31,14 @@ pub fn replace_executable(current_exe: &Path, new_binary_bytes: &[u8]) -> io::Re
     }
     fs::write(&stage_path, new_binary_bytes)?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stage_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stage_path, perms)?;
+    }
+
     let mut backed_up = false;
     let res = (|| -> io::Result<()> {
         // 2. Backup existing binary to .old
@@ -60,14 +68,6 @@ pub fn replace_executable(current_exe: &Path, new_binary_bytes: &[u8]) -> io::Re
 
     if stage_path.exists() {
         let _ = fs::remove_file(&stage_path);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(current_exe)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(current_exe, perms)?;
     }
 
     Ok(())
@@ -131,6 +131,14 @@ mod tests {
 
         let updated_content = fs::read_to_string(&target_exe).unwrap();
         assert_eq!(updated_content, "updated-version-2");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&target_exe).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
 
         let old_file = dir.path().join("agent-statusline.exe.old");
         assert!(old_file.exists());

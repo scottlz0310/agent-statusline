@@ -34,6 +34,15 @@ Windows では、最新の GitHub Release に含まれる PowerShell インス�
 irm https://github.com/scottlz0310/agent-statusline/releases/latest/download/agent-statusline-installer.ps1 | iex
 ```
 
+Linux x86_64 / aarch64 では shell installer を使用できます。ZIP と同じ Release の `.zip.sha256` を検証し、`~/.local/bin/agent-statusline` に配置します。`~/.local/bin` が `PATH` にない場合、installer が設定方法を案内します。
+
+```bash
+curl -fsSLO https://github.com/scottlz0310/agent-statusline/releases/latest/download/agent-statusline-installer.sh
+sh agent-statusline-installer.sh
+```
+
+このリポジトリ内の installer が正式な Release asset になるのは、配布 workflow の切り替え（[#24](https://github.com/scottlz0310/agent-statusline/issues/24)）後です。それまでは公開済み Release の installer が使われます。
+
 #### Windows Defender に関する注意
 
 Windows の検証環境で上記コマンドを実行した際、Microsoft Defender が `Trojan:Win32/Commando!ml` を検出しました。検出対象として表示されたのは PowerShell のコマンド実行です。実行ファイル自体が検出対象だったとは確認されておらず、誤検知かどうかも判断していません。
@@ -50,6 +59,21 @@ cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.1.0
 # 最新の GitHub Release へ更新
 agent-statusline update
 ```
+
+更新時は対象 ZIP と同じ Release の `<ZIP名>.sha256` を取得し、ZIP 全体を検証してから現在のバイナリを置き換えます。checksum の欠落・不一致や ZIP 内のバイナリ欠落時は旧バイナリを保持します。
+
+### v0.1.0 から新配布方式へ移行する場合
+
+新方式の Release 公開後、既存の `v0.1.0` から `agent-statusline update` を実行します。旧 updater からの更新は最初の新方式 Release の実環境検証（[#26](https://github.com/scottlz0310/agent-statusline/issues/26)）で確認します。更新後は `agent-statusline --version` と `agent-statusline status` で動作を確認してください。
+
+上書き更新では cargo-dist が作成した receipt や Linux の `~/.config/agent-statusline/env`、profile 内の読み込み行を削除しません。Linux では次を確認し、不要と判断したものだけ手動で整理してください。
+
+```bash
+ls -l ~/.config/agent-statusline/agent-statusline-receipt.json ~/.config/agent-statusline/env 2>/dev/null || true
+grep -n 'agent-statusline/env\|\.local/bin' ~/.profile ~/.bash_profile ~/.bashrc ~/.zprofile 2>/dev/null || true
+```
+
+新 installer は `env` helper や receipt を作らず、profile を変更しません。既存の PATH 行が必要なら残してください。Windows の旧 receipt と PATH も自動削除しません。後述のアンインストール手順で整理できます。
 
 ### クライアント設定の自動登録
 

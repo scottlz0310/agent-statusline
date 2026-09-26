@@ -40,6 +40,10 @@ jobs:
         shell: pwsh
         run: ./scripts/check-code-behind-size.ps1
 
+      - name: Test Windows installer
+        shell: pwsh
+        run: ./scripts/test-agent-statusline-installer.ps1
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -52,3 +56,11 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  installer-linux:
+    name: Test Linux installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test Linux installer
+        run: sh scripts/test-agent-statusline-installer.sh

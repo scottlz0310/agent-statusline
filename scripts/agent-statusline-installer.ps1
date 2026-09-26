@@ -46,10 +46,15 @@ Write-Host "Target release: $releaseTag" -ForegroundColor Green
 # 2. Locate windows binary asset
 $assetName = "agent-statusline-x86_64-pc-windows-msvc.zip"
 $asset = $release.assets | Where-Object { $_.name -eq $assetName }
+$checksumName = "$assetName.sha256"
+$checksumAsset = $release.assets | Where-Object { $_.name -eq $checksumName }
 
 if (-not $asset) {
     Write-Error "Could not find asset '$assetName' in release '$releaseTag'."
     exit 1
+}
+if (-not $checksumAsset) {
+    throw "Could not find checksum '$checksumName' in release '$releaseTag'."
 }
 
 $downloadUrl = $asset.browser_download_url
@@ -58,9 +63,21 @@ Write-Host "Downloading $assetName from $downloadUrl..."
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-statusline-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 $zipFile = Join-Path $tempDir $assetName
+$checksumFile = Join-Path $tempDir $checksumName
 
 try {
     Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile -UseBasicParsing -Headers $headers
+    Invoke-WebRequest -Uri $checksumAsset.browser_download_url -OutFile $checksumFile -UseBasicParsing -Headers $headers
+
+    $checksumText = (Get-Content -LiteralPath $checksumFile -Raw).TrimEnd("`r", "`n")
+    $checksumPattern = '^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($assetName) + '$'
+    if ($checksumText -cnotmatch $checksumPattern) {
+        throw "Invalid checksum for '$assetName'."
+    }
+    $actualHash = (Get-FileHash -LiteralPath $zipFile -Algorithm SHA256).Hash
+    if ($actualHash -ine $Matches[1]) {
+        throw "SHA-256 mismatch for '$assetName'."
+    }
 
     Write-Host "Extracting archive to temporary directory..."
     $extractDir = Join-Path $tempDir "extracted"
