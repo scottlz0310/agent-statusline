@@ -8,7 +8,7 @@
   * 描画処理で `git` などの外部 CLI を起動せず、起動コストを抑える。実行時間は環境に依存するため、`render --bench` で計測する。
   * **3 大主要 CLI クライアント（Antigravity CLI, Claude Code, GitHub Copilot CLI）** を第一級市民として標準サポート。  
   * `Mcp-Docker` の設計モデルを踏襲した **クライアント設定自動インストーラー（`install` / `uninstall` / `status`）** を備え、ユーザー環境への安全な導入を自動化する。  
-  * `cargo-dist` を用いた自動クロスコンパイルとワンライナーインストーラーにより、複数マシンへの配布・更新を自動化する。  
+* Windows / Linux 向け ZIP と checksum を使い、複数マシンへの配布・更新を自動化する。
   * Starship ライクな TOML 設定とエージェント抽象化レイヤーを導入し、パワーユーザー向けの拡張性を確保する。
 
 ---
@@ -169,7 +169,7 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
 
 ## 6. 自動配布・リリースパイプライン
 
-### 6.1 現在のビルド・配布構成 (`cargo-dist`)
+### 6.1 ビルド・配布ターゲット
 
 * **ビルドターゲット**:  
   * `x86_64-pc-windows-msvc` (Windows / pwsh 用ネイティブ exe)  
@@ -183,10 +183,15 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
   irm https://github.com/scottlz0310/agent-statusline/releases/latest/download/agent-statusline-installer.ps1 | iex
   ```
   `%LOCALAPPDATA%\Programs\agent-statusline` に配置され、`PATH` へ自動登録。
+* **Linux (shell)**: `agent-statusline-installer.sh` が `~/.local/bin/agent-statusline` に配置する。PATH に含まれない場合は案内し、profile や cargo-dist receipt、`env` helper を作成しない。
+
+両 installer は対象 ZIP と同じ Release の `<ZIP名>.sha256` を照合してからバイナリを配置する。リポジトリ内の installer を正式な asset として添付するのは #24 の配布 workflow 切り替え時とする。
 
 ### 6.3 自己更新・自動アップデート機構 (`agent-statusline update`)
 
 GitHub Release からバイナリを取得し、インストール済みバイナリを更新します。公開 Release がない間は、更新確認と更新操作は利用できません。
+
+更新対象は Windows x64、Linux x64 musl、Linux ARM64 musl。未対応 OS/arch は明示的にエラーとする。ZIP と checksum を同じ Release から取得し、ZIP 全体の SHA-256 と checksum に記載された ZIP basename を検証した後に展開・置換する。検証失敗時は旧バイナリを保持する。
 
 1. **実行中バイナリの安全な置換 (Windows 対応)**:
    - Windows では実行中の `.exe` ファイルは直接上書き・削除できませんが、**リネーム（移動）は許可**されています。
@@ -199,16 +204,14 @@ GitHub Release からバイナリを取得し、インストール済みバイ�
 
 ---
 
-## 7. 実装状況と初回リリース準備
+## 7. リリース移行状況
 
-コア機能、3 クライアント対応、設定自動化、TOML 設定、CI、配布ワークフローは実装済みです。タスク一覧は [tasks.md](../tasks.md) を参照してください。
+v0.1.0 は cargo-dist 方式で公開済みです。新方式への移行計画は [#22](https://github.com/scottlz0310/agent-statusline/issues/22)、実装順序は [tasks.md](../tasks.md) を参照してください。
 
-### 7.1 初回リリース手順
+### 7.1 最初の新方式 Release の検証
 
-現時点では Git tag と GitHub Release はまだありません。初回リリース時は次の手順を行います。
+新方式の公開は #24 の配布 workflow と #26 の実環境検証で扱います。
 
-1. `Cargo.toml` のバージョンと `CHANGELOG.md` のリリース内容・日付を確定する。
-2. `Cargo.lock` を更新し、変更を `main` にマージする。
-3. `Cargo.toml` と一致する SemVer タグ（例: `v0.1.0`）を push する。
-4. `Release` workflow の完了後、GitHub Release に Windows x64、Linux x64 musl、Linux ARM64 musl の ZIP、チェックサム、installer があることを確認する。
-5. Windows installer で初回バージョンをインストールした後、`agent-statusline update --force` を実行して、同一バージョンの Release asset を取得・置換できることを確認してから、初回リリースを利用者へ案内する。
+1. draft Release に 3 種類の ZIP、各 `.zip.sha256`、2 種類の installer があることを確認する。
+2. v0.1.0 から `agent-statusline update` できること、Windows / Linux の新規 installer と失敗時の旧バイナリ保持を確認する。
+3. 全 asset の検証後に Release を公開する。実リリースには別途明示的な許可を要する。

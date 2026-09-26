@@ -39,3 +39,9 @@
 - [x] 未使用スケルトン (`Commands::Init`, `--shell`, `ShellKind`) の完全削除とコードビハインド行数ラチェット引き締め
 - [x] カバレッジ目標閾値（target / threshold）の確定と品質ゲートの有効化 (`codecov.yml`: target 80%, threshold 2%/5%, informational: false) (#9)
 - [x] README・設計仕様書の現状同期と初回リリース手順の整備
+
+## 配布方式の移行 (#22)
+
+- [x] 自己更新と Windows / Linux installer の ZIP checksum 検証、旧インストールからの移行手順 (#25)
+- [ ] 3 ターゲットの ZIP / checksum / installer 添付と公開ゲート (#24)
+- [ ] 最初の新方式 Release の実環境検証 (#26)

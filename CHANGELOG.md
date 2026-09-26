@@ -8,8 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Linux shell installer を追加し、ZIP の SHA-256 を検証して `~/.local/bin` に配置。旧 cargo-dist の receipt、`env` helper、profile 設定は保持。
+- v0.1.0 からの更新、旧インストールの残存物確認と手動整理を README に記載。
 - README に GitHub Release と `cargo install` それぞれのアンインストール手順を追加し、Linux の receipt、env helper の読み込み行、更新確認キャッシュの削除を記載。
 - README に Windows での PowerShell インストーラーの Defender 検出事例と、Cargo インストールでの検証結果を追記。
+
+### Changed
+- 自己更新と Windows installer で Release ZIP の SHA-256 を照合し、検証失敗時は既存バイナリを保持。未対応 OS/arch は明示的にエラーとする。
 
 ## [0.1.0] - 2026-09-26
 
