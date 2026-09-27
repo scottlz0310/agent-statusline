@@ -63,7 +63,7 @@ src/
   │      ├─ chrono / 内部算術によるクォータ reset_time 差分計算
   │      └─ terminal_size によるターミナル幅取得
   ├─ 5. Sink 処理 (原子的ファイル書き出し)
-  │      └─ OS のローカルデータディレクトリ/SquirrelNotifier/ratelimit-status/<agent>.json
+  │      └─ OS のローカルデータディレクトリ/SquirrelNotifier/ratelimit-status/<agentId>.json (`claude` は `claude-code`、他は `--agent` と同じ)
   │         (一時ファイル書き出し + 原子的 rename)
   ├─ 6. Format Engine
   │      └─ Starship 風テンプレートに変数をバインドし、ANSI 装飾を付与

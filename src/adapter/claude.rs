@@ -157,7 +157,7 @@ impl StatuslineAdapter for ClaudeAdapter {
         } else {
             Some(RatelimitPayload {
                 schema_version: 1,
-                agent_id: "claude".to_string(),
+                agent_id: "claude-code".to_string(),
                 observed_at: Utc::now().to_rfc3339(),
                 limits: ratelimit_limits,
             })
@@ -225,7 +225,7 @@ mod tests {
 
         assert!(payload.is_some());
         let p = payload.unwrap();
-        assert_eq!(p.agent_id, "claude");
+        assert_eq!(p.agent_id, "claude-code");
     }
 
     #[test]
