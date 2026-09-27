@@ -54,3 +54,4 @@
 ## Squirrel Notifier 双方向連携
 
 - [x] レビュー依頼・キュー状態サマリ（`statusline-summary.json`）をカレントリポジトリ分だけ `$review` で表示 (#23)
+- [x] v0.3.0 リリース

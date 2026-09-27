@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `$git_status` を使わないレイアウトでは、Git の変更状態の判定を省略するようにした。
-- README の `cargo install` 例を最新 Release の `v0.2.0` に更新。
+- README の `cargo install` 例を最新 Release の `v0.3.0` に更新。
 - Release / Prepare Release workflow が参照する `release-automate` の reusable workflow を v2.0.0（`fd3e676`）に更新し、Renovate が追跡できるようバージョンコメントを付与。
 
 ### Fixed
