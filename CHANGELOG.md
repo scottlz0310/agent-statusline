@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README に Windows での PowerShell インストーラーの Defender 検出事例と、Cargo インストールでの検証結果を追記。
 
 ### Changed
+- cargo-dist の生成 workflow を撤廃し、`release-automate` の draft Release と taiki-e の Rust Actions による配布 workflow に置き換え。3 ターゲットの ZIP・`.zip.sha256`・リポジトリ内 installer を draft に添付し、asset 名・checksum・ZIP 構造・各 runner でのバイナリ起動を検証した後にだけ公開する。PR では公開権限なしで同じビルドと検証を行う。`dist-workspace.toml` と `profile.dist` を削除 (#24)。
 - 自己更新と Windows installer で Release ZIP の SHA-256 を照合し、検証失敗時は既存バイナリを保持。未対応 OS/arch は明示的にエラーとする。
 
 ### Fixed

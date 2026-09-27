@@ -185,7 +185,7 @@ output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
   `%LOCALAPPDATA%\Programs\agent-statusline` に配置され、`PATH` へ自動登録。
 * **Linux (shell)**: `agent-statusline-installer.sh` が `~/.local/bin/agent-statusline` に配置する。PATH に含まれない場合は案内し、profile や cargo-dist receipt、`env` helper を作成しない。
 
-両 installer は対象 ZIP と同じ Release の `<ZIP名>.sha256` を照合してからバイナリを配置する。リポジトリ内の installer を正式な asset として添付するのは #24 の配布 workflow 切り替え時とする。
+両 installer は対象 ZIP と同じ Release の `<ZIP名>.sha256` を照合してからバイナリを配置する。v0.2.0 以降の Release にはリポジトリ内の installer を添付する。
 
 ### 6.3 自己更新・自動アップデート機構 (`agent-statusline update`)
 
@@ -204,14 +204,28 @@ GitHub Release からバイナリを取得し、インストール済みバイ�
 
 ---
 
-## 7. リリース移行状況
+## 7. リリース手順
 
-v0.1.0 は cargo-dist 方式で公開済みです。新方式への移行計画は [#22](https://github.com/scottlz0310/agent-statusline/issues/22)、実装順序は [tasks.md](../tasks.md) を参照してください。
+v0.1.0 は cargo-dist 方式で公開した。v0.2.0 以降は `release-automate` と taiki-e の Rust Actions を組み合わせた `.github/workflows/release.yml` で公開する（設計: [#22](https://github.com/scottlz0310/agent-statusline/issues/22)）。
 
-### 7.1 最初の新方式 Release の検証
+### 7.1 配布 asset
 
-新方式の公開は #24 の配布 workflow と #26 の実環境検証で扱います。
+| asset | 内容 |
+| --- | --- |
+| `agent-statusline-<target>.zip` | ルートに `agent-statusline[.exe]` を 1 個だけ置いた ZIP（3 ターゲット） |
+| `agent-statusline-<target>.zip.sha256` | `<hash> *<ZIP名>` 形式の SHA-256 |
+| `agent-statusline-installer.ps1` / `.sh` | `scripts/` 内の installer |
 
-1. draft Release に 3 種類の ZIP、各 `.zip.sha256`、2 種類の installer があることを確認する。
-2. v0.1.0 から `agent-statusline update` できること、Windows / Linux の新規 installer と失敗時の旧バイナリ保持を確認する。
-3. 全 asset の検証後に Release を公開する。実リリースには別途明示的な許可を要する。
+### 7.2 公開の流れ
+
+1. Actions の **Prepare Release** を `target_version` 付きで実行し、`Cargo.toml` / `Cargo.lock` / `CHANGELOG.md` を更新する準備 PR を作る。レビュー後に squash merge する。
+2. `main` のリリースコミット（`chore(release): vX.Y.Z`）を受けた **Release** workflow が、同じ run の中でタグを固定して draft Release を作る。タグの push イベントには依存しない。
+3. 同じ SHA から 3 ターゲットをビルドし、checkout とタグの SHA が一致することを確認してから、ZIP・checksum・installer を draft に添付する。
+4. draft から asset を再取得し、`scripts/verify-release-assets.sh` で asset 名の完全一致、非ゼロサイズ、checksum、ZIP 内の単一バイナリを検証する。Windows x64 / Linux x64 / Linux ARM64 の各 runner で展開したバイナリを実行し、`--version` がタグと一致することも確認する。
+5. すべて成功した場合だけ `release-automate` の finalize で公開する。
+
+途中で失敗した場合は draft のまま残る。同じ run を再実行すると、同じタグ/SHA の draft に限り asset を置き換えて検証をやり直す。異なる SHA のタグや公開済み Release は書き換えない。
+
+PR では公開権限を使わず、3 ターゲットのビルドと asset 構造・起動を同じスクリプトで検証する（`release.yml`・`scripts/`・`Cargo.toml`・`Cargo.lock` を変更した場合）。
+
+最初の新方式 Release での既存版からの更新と新規インストールの確認は [#26](https://github.com/scottlz0310/agent-statusline/issues/26) で扱う。実リリースには別途明示的な許可を要する。
