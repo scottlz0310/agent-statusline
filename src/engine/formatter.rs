@@ -1,13 +1,16 @@
 use crate::engine::config::{
     AgentStateConfig, Config, ContextConfig, DirectoryConfig, GitBranchConfig, GitStatusConfig,
-    ModelConfig, PlanConfig, QuotaConfig, SandboxConfig,
+    ModelConfig, PlanConfig, QuotaConfig, ReviewConfig, SandboxConfig, SquirrelNotifierConfig,
 };
 use crate::engine::style::{pct_style_name, render_styled_text};
+use crate::model::review_summary::{ActiveReview, QueuedReview};
 use crate::model::state::StatuslineState;
 use crate::modules::context::format_tokens;
 use crate::modules::directory::format_path;
-use crate::modules::git::get_git_status;
+use crate::modules::git::{GitQuery, get_git_status};
 use crate::modules::quota::format_reset_seconds;
+use crate::modules::review::{default_summary_path, load_summary, reviews_for_repo};
+use crate::sink::notifier::expand_env_path;
 
 pub fn render_directory(
     cfg: &DirectoryConfig,
@@ -200,6 +203,59 @@ pub fn render_quota(cfg: &QuotaConfig, state: &StatuslineState) -> String {
     }
 }
 
+pub fn render_review(
+    cfg: &ReviewConfig,
+    active: &[&ActiveReview],
+    waiting: &[&QueuedReview],
+) -> String {
+    if cfg.disabled || (active.is_empty() && waiting.is_empty()) {
+        return String::new();
+    }
+
+    let items = active
+        .iter()
+        .map(|r| {
+            cfg.active_format
+                .replace("$pr", &r.pr_number.to_string())
+                .replace("$round", &r.round.to_string())
+                .replace("$agent", r.agent.as_deref().unwrap_or(""))
+        })
+        .chain(waiting.iter().map(|r| {
+            cfg.waiting_format
+                .replace("$pr", &r.pr_number.to_string())
+                .replace("$round", &r.round.to_string())
+                .replace("$reason", &r.reason)
+        }))
+        .collect::<Vec<_>>()
+        .join(&cfg.separator);
+
+    cfg.format
+        .replace("$symbol", &cfg.symbol)
+        .replace("$items", &items)
+        .replace("$style", &cfg.style)
+}
+
+/// Squirrel Notifier のサマリからカレントリポジトリ分のレビュー状態を描画する
+fn render_review_for_repo(
+    cfg: &ReviewConfig,
+    integration: &SquirrelNotifierConfig,
+    repo: Option<&str>,
+) -> String {
+    let Some(repo) = repo else {
+        return String::new();
+    };
+    let path = integration
+        .summary_path
+        .as_deref()
+        .map(expand_env_path)
+        .or_else(default_summary_path);
+    let Some(summary) = path.as_deref().and_then(load_summary) else {
+        return String::new();
+    };
+    let (active, waiting) = reviews_for_repo(&summary, repo);
+    render_review(cfg, &active, &waiting)
+}
+
 /// 設定テンプレートに従ってステータスラインを描画する
 pub fn render_template(config: &Config, state: &StatuslineState, terminal_width: usize) -> String {
     let dir_str = if config.format.contains("$directory") {
@@ -208,11 +264,20 @@ pub fn render_template(config: &Config, state: &StatuslineState, terminal_width:
         String::new()
     };
 
-    let needs_git = (config.format.contains("$git_branch") && !config.git_branch.disabled)
-        || (config.format.contains("$git_status") && !config.git_status.disabled);
+    let needs_branch = config.format.contains("$git_branch") && !config.git_branch.disabled;
+    let needs_dirty = config.format.contains("$git_status") && !config.git_status.disabled;
+    let needs_review = config.format.contains("$review")
+        && !config.review.disabled
+        && config.integrations.squirrel_notifier.enabled;
 
-    let git_status = if needs_git {
-        Some(get_git_status(&state.cwd))
+    let git_status = if needs_branch || needs_dirty || needs_review {
+        Some(get_git_status(
+            &state.cwd,
+            GitQuery {
+                dirty: needs_dirty,
+                remote_repo: needs_review,
+            },
+        ))
     } else {
         None
     };
@@ -265,6 +330,16 @@ pub fn render_template(config: &Config, state: &StatuslineState, terminal_width:
         String::new()
     };
 
+    let review_str = if needs_review {
+        render_review_for_repo(
+            &config.review,
+            &config.integrations.squirrel_notifier,
+            git_status.as_ref().and_then(|g| g.remote_repo.as_deref()),
+        )
+    } else {
+        String::new()
+    };
+
     let mut output_lines = Vec::new();
 
     for line in config.format.lines() {
@@ -277,7 +352,8 @@ pub fn render_template(config: &Config, state: &StatuslineState, terminal_width:
             .replace("$context", &context_str)
             .replace("$agent_state", &agent_state_str)
             .replace("$plan", &plan_str)
-            .replace("$quota", &quota_str);
+            .replace("$quota", &quota_str)
+            .replace("$review", &review_str);
 
         let trimmed = filled.trim_end();
         if !trimmed.is_empty() {
@@ -458,5 +534,104 @@ mod tests {
 
         let rendered = render_template(&config, &state, 80);
         assert!(!rendered.contains("idle"));
+    }
+
+    fn active(pr_number: u64, round: u32, agent: Option<&str>) -> ActiveReview {
+        ActiveReview {
+            repository: "o/r".to_string(),
+            pr_number,
+            round,
+            agent: agent.map(str::to_string),
+        }
+    }
+
+    fn waiting(pr_number: u64, round: u32, reason: &str) -> QueuedReview {
+        QueuedReview {
+            repository: "o/r".to_string(),
+            pr_number,
+            round,
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_render_review() {
+        let plain = ReviewConfig {
+            format: "$symbol$items".to_string(),
+            ..Default::default()
+        };
+        let custom = ReviewConfig {
+            format: "$items".to_string(),
+            active_format: "$pr:$agent".to_string(),
+            waiting_format: "$pr:$reason".to_string(),
+            separator: ",".to_string(),
+            ..Default::default()
+        };
+        let disabled = ReviewConfig {
+            disabled: true,
+            ..Default::default()
+        };
+        let a = [active(31, 2, Some("claude")), active(33, 1, None)];
+        let w = [waiting(32, 1, "opened")];
+        let cases = [
+            (
+                "both",
+                &plain,
+                vec![&a[0]],
+                vec![&w[0]],
+                "🐿 🔍#31 r2 ⏳#32 r1",
+            ),
+            ("waiting-only", &plain, vec![], vec![&w[0]], "🐿 ⏳#32 r1"),
+            ("empty", &plain, vec![], vec![], ""),
+            (
+                "custom",
+                &custom,
+                vec![&a[0], &a[1]],
+                vec![&w[0]],
+                "31:claude,33:,32:opened",
+            ),
+            ("disabled", &disabled, vec![&a[0]], vec![&w[0]], ""),
+        ];
+        for (name, cfg, active, waiting, expected) in cases {
+            assert_eq!(render_review(cfg, &active, &waiting), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_render_review_for_repo_reads_summary_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("statusline-summary.json");
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":1,"items":[
+                {"repository":"Owner/Repo","prNumber":7,"round":1,"reason":"opened"}]},
+                "activeReviews":[]}"#,
+        )
+        .unwrap();
+        let cfg = ReviewConfig {
+            format: "$items".to_string(),
+            ..Default::default()
+        };
+        let integration = SquirrelNotifierConfig {
+            summary_path: Some(path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let missing = SquirrelNotifierConfig {
+            summary_path: Some(dir.path().join("none.json").to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let cases = [
+            ("match", &integration, Some("owner/repo"), "⏳#7 r1"),
+            ("other-repo", &integration, Some("owner/other"), ""),
+            ("no-remote", &integration, None, ""),
+            ("no-summary", &missing, Some("owner/repo"), ""),
+        ];
+        for (name, integration, repo, expected) in cases {
+            assert_eq!(
+                render_review_for_repo(&cfg, integration, repo),
+                expected,
+                "{name}"
+            );
+        }
     }
 }
