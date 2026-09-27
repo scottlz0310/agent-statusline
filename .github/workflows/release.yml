@@ -155,7 +155,7 @@ jobs:
 
   collect-dry-run:
     needs: build
-    if: github.event_name == 'pull_request'
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
