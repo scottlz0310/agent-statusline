@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README の `cargo install` 例を最新 Release の `v0.2.0` に更新。
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
