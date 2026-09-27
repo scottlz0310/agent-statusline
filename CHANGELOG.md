@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - 自己更新と Windows installer で Release ZIP の SHA-256 を照合し、検証失敗時は既存バイナリを保持。未対応 OS/arch は明示的にエラーとする。
 
+### Fixed
+- `render --agent claude` のレートリミット出力を Squirrel Notifier の契約に合わせ、`ratelimit-status/claude-code.json`（`agentId: "claude-code"`）へ書き出すよう修正。CLI 引数の `claude` は変更なし。v0.1.0 が書き出していた `ratelimit-status/claude.json` は参照されないため手動で削除してよい (#28)。
+
 ## [0.1.0] - 2026-09-26
 
 ### Changed
