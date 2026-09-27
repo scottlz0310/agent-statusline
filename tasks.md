@@ -49,4 +49,4 @@
 ## 不具合修正
 
 - [x] Claude Code のレートリミット出力 ID を Squirrel Notifier の契約（`claude-code`）に合わせる (#28)
-- [ ] v0.2.0 リリース（#24 完了後）
+- [x] v0.2.0 リリース（#24 完了後）
