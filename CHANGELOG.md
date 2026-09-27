@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `$review` モジュールを追加。Squirrel Notifier の `statusline-summary.json` から、カレントリポジトリの PR のうちレビュー実行中と reviewer 起動待ちのものを表示する（例: `🐿 🔍#31 r2 ⏳#32 r1`）。既定レイアウトの 1 行目に含め、`[review]` と `[integrations.squirrel_notifier] summary_path` で変更できる。Squirrel Notifier 未起動時やリポジトリ外では何も表示しない (#23)。
+
 ### Changed
+- `$git_status` を使わないレイアウトでは、Git の変更状態の判定を省略するようにした。
 - README の `cargo install` 例を最新 Release の `v0.2.0` に更新。
 
 ## [0.2.0] - 2026-09-27

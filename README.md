@@ -17,6 +17,7 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステー�
   - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` 等）への statusline コマンド登録・解除をワンコマンドで自動実行。
 - 🐿️ **Squirrel Notifier 連携**:
   - 各クライアントのレートリミット状態（5時間枠・週次枠・クォータ残量）を共通スキーマ（`schemaVersion: 1`）に集約し、ローカルへ原子的（Atomic rename）に出力。
+  - Squirrel Notifier が出力するレビュー・キュー状態のサマリから、カレントリポジトリの PR のうちレビュー実行中（🔍）と reviewer 起動待ち（⏳）のものを `$review` に表示（例: `🐿 🔍#31 r2 ⏳#32 r1`）。Squirrel Notifier が起動していない場合やリポジトリ外では何も表示しない。
 - 🔄 **自動更新 (`agent-statusline update`)**:
   - GitHub Release から更新し、バイナリを置き換える。描画時の更新確認は 24 時間ごとにバックグラウンドで行う。
 - 🎨 **Starship ライクな TOML 設定**:

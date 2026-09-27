@@ -42,7 +42,7 @@ src/
 ├── cli.rs
 ├── adapter/       # agy、claude、copilot の入力変換
 ├── model/         # 共通状態と Squirrel Notifier スキーマ
-├── modules/       # context、directory、git、quota
+├── modules/       # context、directory、git、quota、review
 ├── engine/        # TOML 設定、テンプレート、ANSI スタイル
 ├── installer/     # クライアント設定の install / uninstall / status
 ├── sink/          # Squirrel Notifier JSON の原子的書き出し
@@ -59,7 +59,8 @@ src/
   ├─ 2. 設定読み込み (config.toml / デフォルトフォールバック)
   ├─ 3. Adapter::parse() で内部共通型 StatuslineState へデシリアライズ
   ├─ 4. Rust ライブラリによる情報取得
-  │      ├─ gix による Git ブランチ・変更状態の取得
+  │      ├─ gix による Git ブランチ・変更状態・リモート (`owner/repo`) の取得
+  │      ├─ Squirrel Notifier のレビュー・キュー状態サマリの読み込み (`$review` 使用時)
   │      ├─ chrono / 内部算術によるクォータ reset_time 差分計算
   │      └─ terminal_size によるターミナル幅取得
   ├─ 5. Sink 処理 (原子的ファイル書き出し)
@@ -114,7 +115,7 @@ agent-statusline status
 # ~/.config/agent-statusline/config.toml (または %APPDATA%/agent-statusline/config.toml)
 
 format = """
-$directory$git_branch$git_status$sandbox
+$directory$git_branch$git_status$sandbox$review
 $model$context$agent_state$plan
 $quota
 """
@@ -160,10 +161,32 @@ symbol = "⏳ "
 format = "[$symbol$label: $percentage (rst $reset_time)]($style) "
 separator = "  |  "
 
+[review]
+symbol = "🐿 "
+format = "[$symbol$items]($style) "
+active_format = "🔍#$pr r$round"   # $pr $round $agent
+waiting_format = "⏳#$pr r$round"  # $pr $round $reason
+separator = " "
+style = "yellow"
+
 [integrations.squirrel_notifier]
 enabled = true
 output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
+summary_path = "%LOCALAPPDATA%/SquirrelNotifier/statusline-summary.json"
 ```
+
+### 5.2 レビュー・キュー状態 (`$review`)
+
+Squirrel Notifier が出力する `statusline-summary.json`（`schemaVersion: 1`。契約は squirrel-notifier の `docs/statusline-integration.md`）を読み、カレントリポジトリの PR のうち、reviewer 実行中（`activeReviews`）と起動待ち（`queue.items`）のものを、この順で表示する。
+
+* カレントリポジトリは、gix で解決した fetch 用の既定リモートの URL から `owner/repo` を取り出して特定する。既定リモートは、現在のブランチの upstream、`origin`、唯一のリモートの順で決まる。サマリの `repository` とは大文字小文字を区別せずに比較する。
+* 次の場合は何も表示しない。
+  * `[integrations.squirrel_notifier] enabled = false`、`[review] disabled = true`、またはフォーマットに `$review` がない
+  * Git リポジトリの外、またはリモートがない
+  * サマリがない（Squirrel Notifier 未起動）、JSON が壊れている、`schemaVersion` が 1 ではない
+  * 該当する PR がない
+* サマリにブランチ情報はないため、表示はリポジトリ単位になる。
+* Squirrel Notifier が異常終了するとサマリが残り、次に起動するまで古い状態を表示する。サマリは状態が変わったときにだけ書き出されるため、`updatedAt` の古さでは古い状態かどうかを判定できない。
 
 ---
 

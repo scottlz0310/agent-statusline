@@ -44,9 +44,13 @@
 
 - [x] 自己更新と Windows / Linux installer の ZIP checksum 検証、旧インストールからの移行手順 (#25)
 - [x] 3 ターゲットの ZIP / checksum / installer 添付と公開ゲート (#24)
-- [ ] 最初の新方式 Release の実環境検証 (#26)
+- [x] 最初の新方式 Release の実環境検証 (#26)
 
 ## 不具合修正
 
 - [x] Claude Code のレートリミット出力 ID を Squirrel Notifier の契約（`claude-code`）に合わせる (#28)
 - [x] v0.2.0 リリース（#24 完了後）
+
+## Squirrel Notifier 双方向連携
+
+- [x] レビュー依頼・キュー状態サマリ（`statusline-summary.json`）をカレントリポジトリ分だけ `$review` で表示 (#23)

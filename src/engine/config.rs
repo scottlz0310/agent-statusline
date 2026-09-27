@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_FORMAT: &str =
-    "$directory$git_branch$git_status$sandbox\n$model$context$agent_state$plan\n$quota";
+    "$directory$git_branch$git_status$sandbox$review\n$model$context$agent_state$plan\n$quota";
 
 fn default_format() -> String {
     DEFAULT_FORMAT.to_string()
@@ -42,6 +42,9 @@ pub struct Config {
     pub plan: PlanConfig,
 
     #[serde(default)]
+    pub review: ReviewConfig,
+
+    #[serde(default)]
     pub integrations: IntegrationsConfig,
 }
 
@@ -58,6 +61,7 @@ impl Default for Config {
             quota: QuotaConfig::default(),
             agent_state: AgentStateConfig::default(),
             plan: PlanConfig::default(),
+            review: ReviewConfig::default(),
             integrations: IntegrationsConfig::default(),
         }
     }
@@ -442,6 +446,66 @@ impl Default for PlanConfig {
     }
 }
 
+/// Squirrel Notifier のレビュー・キュー状態 (カレントリポジトリ分のみ)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    #[serde(default = "default_review_format")]
+    pub format: String,
+
+    #[serde(default = "default_review_symbol")]
+    pub symbol: String,
+
+    /// reviewer 実行中の PR 1 件分 (`$pr` `$round` `$agent`)
+    #[serde(default = "default_review_active_format")]
+    pub active_format: String,
+
+    /// reviewer 起動待ちの PR 1 件分 (`$pr` `$round` `$reason`)
+    #[serde(default = "default_review_waiting_format")]
+    pub waiting_format: String,
+
+    #[serde(default = "default_review_separator")]
+    pub separator: String,
+
+    #[serde(default = "default_review_style")]
+    pub style: String,
+
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_review_format() -> String {
+    "[$symbol$items]($style) ".to_string()
+}
+fn default_review_symbol() -> String {
+    "🐿 ".to_string()
+}
+fn default_review_active_format() -> String {
+    "🔍#$pr r$round".to_string()
+}
+fn default_review_waiting_format() -> String {
+    "⏳#$pr r$round".to_string()
+}
+fn default_review_separator() -> String {
+    " ".to_string()
+}
+fn default_review_style() -> String {
+    "yellow".to_string()
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            format: default_review_format(),
+            symbol: default_review_symbol(),
+            active_format: default_review_active_format(),
+            waiting_format: default_review_waiting_format(),
+            separator: default_review_separator(),
+            style: default_review_style(),
+            disabled: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntegrationsConfig {
     #[serde(default)]
@@ -455,6 +519,10 @@ pub struct SquirrelNotifierConfig {
 
     #[serde(default)]
     pub output_dir: Option<String>,
+
+    /// レビュー・キュー状態サマリ (`statusline-summary.json`) のパス。環境変数展開に対応
+    #[serde(default)]
+    pub summary_path: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -466,6 +534,7 @@ impl Default for SquirrelNotifierConfig {
         Self {
             enabled: true,
             output_dir: None,
+            summary_path: None,
         }
     }
 }
