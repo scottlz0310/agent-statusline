@@ -1,0 +1,21 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Release version (e.g. 0.2.0)'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  prepare:
+    uses: scottlz0310/release-automate/.github/workflows/reusable-prepare-release.yml@a1e8aebe6f2ffecf333bef0065adc9f4abd96eda
+    secrets:
+      RELEASE_BOT_APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+    with:
+      target_version: ${{ inputs.target_version }}
+      bump_strategy: rust

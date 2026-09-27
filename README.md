@@ -41,7 +41,7 @@ curl -fsSLO https://github.com/scottlz0310/agent-statusline/releases/latest/down
 sh agent-statusline-installer.sh
 ```
 
-このリポジトリ内の installer が正式な Release asset になるのは、配布 workflow の切り替え（[#24](https://github.com/scottlz0310/agent-statusline/issues/24)）後です。それまでは公開済み Release の installer が使われます。
+v0.2.0 以降の Release では、このリポジトリ内の installer を正式な asset として添付します。v0.1.0 の installer は cargo-dist の生成物です。
 
 #### Windows Defender に関する注意
 
