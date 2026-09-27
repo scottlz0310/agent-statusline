@@ -180,9 +180,10 @@ summary_path = "%LOCALAPPDATA%/SquirrelNotifier/statusline-summary.json"
 Squirrel Notifier が出力する `statusline-summary.json`（`schemaVersion: 1`。契約は squirrel-notifier の `docs/statusline-integration.md`）を読み、カレントリポジトリの PR のうち、reviewer 実行中（`activeReviews`）と起動待ち（`queue.items`）のものを、この順で表示する。
 
 * カレントリポジトリは、gix で解決した fetch 用の既定リモートの URL から `owner/repo` を取り出して特定する。既定リモートは、現在のブランチの upstream、`origin`、唯一のリモートの順で決まる。サマリの `repository` とは大文字小文字を区別せずに比較する。
+* サマリの `repository` は GitHub の `owner/repo` なので、ホストが `github.com`（SSH over 443 の `ssh.github.com` を含む）のリモートだけを対象にする。GitLab など別ホストの同名リポジトリは一致させない。`~/.ssh/config` のホスト別名は gix が解決しないため対象外。
 * 次の場合は何も表示しない。
   * `[integrations.squirrel_notifier] enabled = false`、`[review] disabled = true`、またはフォーマットに `$review` がない
-  * Git リポジトリの外、またはリモートがない
+  * Git リポジトリの外、リモートがない、またはリモートが GitHub ではない
   * サマリがない（Squirrel Notifier 未起動）、JSON が壊れている、`schemaVersion` が 1 ではない
   * 該当する PR がない
 * サマリにブランチ情報はないため、表示はリポジトリ単位になる。
