@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Added
 - Linux shell installer を追加し、ZIP の SHA-256 を検証して `~/.local/bin` に配置。旧 cargo-dist の receipt、`env` helper、profile 設定は保持。
 - v0.1.0 からの更新、旧インストールの残存物確認と手動整理を README に記載。
