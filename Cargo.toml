@@ -1,6 +1,6 @@
 [package]
 name = "agent-statusline"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["scottlz0310"]
 description = "High-performance, zero-fork statusline for AI coding agents (Antigravity, Claude Code, GitHub Copilot)"
