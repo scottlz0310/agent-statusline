@@ -41,7 +41,16 @@ pub fn system_config_path() -> Option<PathBuf> {
     if !cfg!(windows) {
         return resolve();
     }
-    resolve_cached(&cache_file_path(), chrono::Utc::now().timestamp(), resolve)
+    let cache_path = cache_file_path();
+    let (path, save_error) = resolve_cached(&cache_path, chrono::Utc::now().timestamp(), resolve);
+    // 保存できないと描画のたびに `git` が起動するため、原因を追えるよう警告する
+    if let Some(err) = save_error {
+        eprintln!(
+            "[agent-statusline] Failed to save git system config cache to {}: {err}",
+            cache_path.display()
+        );
+    }
+    path
 }
 
 fn cache_file_path() -> PathBuf {
@@ -52,25 +61,27 @@ fn cache_file_path() -> PathBuf {
         .join("git_system_config.json")
 }
 
+/// 解決したパスと、キャッシュの保存に失敗した場合のエラーを返す
 fn resolve_cached(
     cache_path: &Path,
     now: i64,
     resolve: impl FnOnce() -> Option<PathBuf>,
-) -> Option<PathBuf> {
+) -> (Option<PathBuf>, Option<io::Error>) {
     if let Some(cache) = SystemConfigCache::load(cache_path)
         && cache.is_fresh(now)
         && cache.path.as_deref().is_none_or(Path::is_file)
     {
-        return cache.path;
+        return (cache.path, None);
     }
 
     let path = resolve();
-    let _ = SystemConfigCache {
+    let save_error = SystemConfigCache {
         resolved_at: now,
         path: path.clone(),
     }
-    .save(cache_path);
-    path
+    .save(cache_path)
+    .err();
+    (path, save_error)
 }
 
 #[cfg(test)]
@@ -132,12 +143,13 @@ mod tests {
             }
             let called = Cell::new(false);
 
-            let path = resolve_cached(&cache_path, NOW, || {
+            let (path, save_error) = resolve_cached(&cache_path, NOW, || {
                 called.set(true);
                 Some(resolved.clone())
             });
 
             assert_eq!(path, expected, "{name}");
+            assert!(save_error.is_none(), "{name}: {save_error:?}");
             assert_eq!(called.get(), expect_resolve, "{name}");
             if expect_resolve {
                 assert_eq!(
@@ -150,5 +162,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_resolve_cached_reports_save_error_and_resolves_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // 親がファイルのため、キャッシュのディレクトリを作れない
+        let blocker = dir.path().join("not-a-directory");
+        fs::write(&blocker, "").unwrap();
+        let cache_path = blocker.join("git_system_config.json");
+        let resolved = dir.path().join("resolved-gitconfig");
+        let calls = Cell::new(0);
+
+        for _ in 0..2 {
+            let (path, save_error) = resolve_cached(&cache_path, NOW, || {
+                calls.set(calls.get() + 1);
+                Some(resolved.clone())
+            });
+
+            assert_eq!(path, Some(resolved.clone()));
+            assert!(save_error.is_some());
+        }
+        assert_eq!(calls.get(), 2);
     }
 }
