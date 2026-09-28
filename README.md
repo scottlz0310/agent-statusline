@@ -201,7 +201,7 @@ lefthook run pre-push --all-files
 
 # 手動での個別チェック
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo test
 pwsh -File scripts/check-code-behind-size.ps1
 ```

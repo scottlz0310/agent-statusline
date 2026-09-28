@@ -254,6 +254,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "更新失敗時の検証は ZIP・checksum・既存バイナリの準備が長く、分割すると前提と検証の対応が追いにくくなる"
+    )]
     fn verified_update_preserves_old_binary_on_invalid_assets() {
         let archive_name = "agent-statusline-x86_64-pc-windows-msvc.zip";
         let mut archive = Vec::new();

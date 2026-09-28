@@ -34,7 +34,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy check
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Check code-behind size
         shell: pwsh

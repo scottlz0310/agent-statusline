@@ -9,7 +9,7 @@ pre-commit:
       run: cargo fmt --check
     rust-clippy:
       glob: "*.rs"
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
     code-behind-size:
       glob: "{src/main.rs,src/cli.rs,scripts/check-code-behind-size.ps1}"
       run: pwsh -File scripts/check-code-behind-size.ps1

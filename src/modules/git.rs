@@ -75,6 +75,7 @@ fn github_repo_slug(host: Option<&str>, path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write;
 
     #[test]
     fn test_get_git_status_in_repo() {
@@ -110,7 +111,7 @@ mod tests {
             gix::init(dir.path()).unwrap();
             let config = dir.path().join(".git").join("config");
             let mut content = std::fs::read_to_string(&config).unwrap();
-            content.push_str(&format!("[remote \"origin\"]\n\turl = {url}\n"));
+            write!(content, "[remote \"origin\"]\n\turl = {url}\n").unwrap();
             std::fs::write(&config, content).unwrap();
 
             let status = get_git_status(
