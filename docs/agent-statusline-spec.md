@@ -17,6 +17,7 @@
 
 1. **描画経路で外部 CLI を起動しない**:
    * Git 操作は `gix`、時刻計算は `chrono`、JSON 操作は `serde_json` で行う。24 時間ごとのバックグラウンド更新確認では同じ実行ファイルを起動する（6.3 節）。
+   * 例外として Windows では、gix がシステムの gitconfig の場所を調べるために `git` を起動する（1 回約 40ms）。求めたパスは OS のキャッシュディレクトリの `agent-statusline/git_system_config.json` に保存し、24 時間再利用する。同じ理由で `git` が起動するため、Windows ではシステムの gitattributes を読み込まない（Git for Windows 既定の内容は diff ドライバの指定だけで、変更状態の判定に影響しない）。
 2. **3 大クライアントの統合サポート**:  
    * Antigravity CLI (`agy`)、Claude Code (`claude`)、GitHub Copilot CLI (`copilot`) の入力 JSON スキーマの違いを `Adapter` 層で吸収し、単一バイナリでシームレスに処理。
 3. **Mcp-Docker 方式の安全なクライアント設定自動化**:  

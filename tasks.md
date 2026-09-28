@@ -12,7 +12,7 @@
 - [x] `gix` によるインプロセス Git 状態検出モジュールの実装
 - [x] クォータ計算および Squirrel Notifier 原子的書き出しモジュールの実装
 - [x] デフォルト 3 行 ANSI レンダリングエンジンの実装
-- [x] `render` コマンドの実装と実行レイテンシ検証 (< 5ms 実測 4.2ms)
+- [x] `render` コマンドの実装と実行レイテンシ検証 (#35 で再計測。既定レイアウトの中央値は Linux 約 2ms、Windows 約 11〜16ms)
 
 ## Phase 2: クライアント設定自動化 (`install` / `uninstall` / `status`)
 - [x] 各クライアントの設定ファイルパス解決 (`client.rs`: `AgentConfigTarget`)

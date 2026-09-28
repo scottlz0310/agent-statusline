@@ -7,8 +7,8 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステー�
 ## 主な特徴
 
 - ⚡ **外部 CLI に依存しない描画**:
-  - Git 状態・JSON・時刻の処理に `git`、`jq`、`date` などの外部 CLI を使わず、Rust のライブラリで処理。
-  - `render --bench` で実行環境ごとの描画時間を計測可能。開発時の実測は 4.2ms。
+  - Git 状態・JSON・時刻の処理に `git`、`jq`、`date` などの外部 CLI を使わず、Rust のライブラリで処理。ただし Windows では、システムの Git 設定ファイルの場所を調べるために、24 時間に 1 回だけ `git` を起動する。
+  - `render --bench` で実行環境ごとの描画時間を計測可能。Git リポジトリ内での既定レイアウトの実測（中央値）は、Linux で約 2ms、Windows で約 11〜16ms（計測条件は [#35](https://github.com/scottlz0310/agent-statusline/issues/35)）。
 - 🤝 **3 大 AI CLI クライアント対応**:
   - **Antigravity CLI (`agy`)**
   - **Claude Code (`claude`)**
@@ -119,7 +119,7 @@ if (Test-Path -LiteralPath $installDir) {
     Remove-Item -LiteralPath $installDir -Recurse -Force
 }
 
-foreach ($fileName in 'agent-statusline-receipt.json', 'update_check.json') {
+foreach ($fileName in 'agent-statusline-receipt.json', 'update_check.json', 'git_system_config.json') {
     $file = Join-Path $appDataDir $fileName
     if (Test-Path -LiteralPath $file) {
         Remove-Item -LiteralPath $file -Force
@@ -131,7 +131,7 @@ if ((Test-Path -LiteralPath $appDataDir) -and -not (Get-ChildItem -LiteralPath $
 }
 ```
 
-この処理はユーザー環境変数 `Path` からインストール先だけを取り除き、cargo-dist の receipt と更新確認キャッシュを削除します。反映を確認するには PowerShell を開き直してください。`%APPDATA%\agent-statusline\config.toml` のユーザー設定と、各クライアント設定の `.bak` は確認後に必要に応じて削除してください。
+この処理はユーザー環境変数 `Path` からインストール先だけを取り除き、cargo-dist の receipt、更新確認キャッシュ、Git 設定の場所のキャッシュを削除します。反映を確認するには PowerShell を開き直してください。`%APPDATA%\agent-statusline\config.toml` のユーザー設定と、各クライアント設定の `.bak` は確認後に必要に応じて削除してください。
 
 Linux では、インストール先のバイナリ、cargo-dist の install receipt、更新確認キャッシュを削除します。cargo-dist 0.33.0 は flat install の場合に `env` ヘルパーも設定ディレクトリへ配置します。`~/.profile` などのシェル設定ファイルからこのヘルパーを読み込む行（`. <env-path>` 形式）と、インストーラーが追加した `~/.local/bin` の PATH 設定行を削除してください。
 
