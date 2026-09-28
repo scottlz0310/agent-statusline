@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI と lefthook の clippy を `cargo clippy --all-targets -- -D warnings` に変更し、テストコードも検査対象にした。既存のテストコードで検出された 2 件（`format_push_string`、`too_many_lines`）を解消 (#38)。
+
 ## [0.3.0] - 2026-09-27
 
 ### Added

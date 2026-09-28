@@ -209,6 +209,10 @@ fn update_executable_from_release(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "更新失敗時の検証は ZIP・checksum・既存バイナリの準備が長く、分割すると前提と検証の対応が追いにくくなる"
+)]
 mod tests {
     use super::*;
     use std::fs;
