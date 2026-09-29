@@ -1,5 +1,10 @@
 use std::path::Path;
 
+use gix::sec::Trust;
+use gix::sec::trust::DefaultForLevel;
+
+use super::git_system_config::system_config_path;
+
 #[derive(Debug, Clone, Default)]
 pub struct GitStatus {
     pub branch: Option<String>,
@@ -15,9 +20,9 @@ pub struct GitQuery {
     pub remote_repo: bool,
 }
 
-/// gix によるインプロセス Git 情報取得 (git.exe 呼び出しなし)
+/// gix によるインプロセス Git 情報取得
 pub fn get_git_status(path: &Path, query: GitQuery) -> GitStatus {
-    let Ok(repo) = gix::discover(path) else {
+    let Some(repo) = discover(path, system_config_path().as_deref()) else {
         return GitStatus::default();
     };
 
@@ -52,6 +57,36 @@ pub fn get_git_status(path: &Path, query: GitQuery) -> GitStatus {
         branch,
         is_dirty,
         remote_repo,
+    }
+}
+
+fn discover(path: &Path, system_config: Option<&Path>) -> Option<gix::Repository> {
+    let trust_map = gix::sec::trust::Mapping {
+        full: open_options(Trust::Full, system_config),
+        reduced: open_options(Trust::Reduced, system_config),
+    };
+    gix::ThreadSafeRepository::discover_opts(
+        path,
+        gix::discover::upwards::Options::default(),
+        trust_map,
+    )
+    .ok()
+    .map(Into::into)
+}
+
+/// 描画のたびに `git.exe` を起動しないよう、システム設定の場所を gix に探させない
+fn open_options(level: Trust, system_config: Option<&Path>) -> gix::open::Options {
+    let mut permissions = gix::open::Permissions::default_for_level(level);
+    permissions.config.system &= system_config.is_some();
+    // Windows ではシステム gitattributes の場所を調べるためにも `git.exe` が起動する。
+    // Git for Windows 既定の内容は diff ドライバの指定だけで、変更状態の判定には影響しない。
+    if cfg!(windows) {
+        permissions.attributes.system = false;
+    }
+    let options = gix::open::Options::default_for_level(level).permissions(permissions);
+    match system_config {
+        Some(path) => options.system_config_path(path),
+        None => options,
     }
 }
 
@@ -97,6 +132,30 @@ mod tests {
                 remote_repo: true,
             },
         );
+    }
+
+    #[test]
+    fn test_discover_loads_only_given_system_config() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        let system_config = dir.path().join("system-gitconfig");
+        std::fs::write(&system_config, "[agentstatusline]\n\tprobe = true\n").unwrap();
+
+        let cases = [(Some(system_config.as_path()), true), (None, false)];
+        for (system_config, expected) in cases {
+            let repo = discover(dir.path(), system_config).unwrap();
+            let config = repo.config_snapshot();
+            let has_system_section = config
+                .plumbing()
+                .sections()
+                .any(|section| section.meta().source == gix::config::Source::System);
+            assert_eq!(has_system_section, expected, "{system_config:?}");
+            assert_eq!(
+                config.boolean("agentstatusline.probe"),
+                expected.then_some(true),
+                "{system_config:?}"
+            );
+        }
     }
 
     #[test]
