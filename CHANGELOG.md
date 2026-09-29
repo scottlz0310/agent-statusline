@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - CI と lefthook の clippy を `cargo clippy --all-targets -- -D warnings` に変更し、テストコードも検査対象にした。既存のテストコードで検出された 2 件（`format_push_string`、`too_many_lines`）を解消 (#38)。
 - README と tasks.md の描画時間を、計測条件付きの実測値に更新 (#35)。
+- README の `cargo install` 例を最新 Release の `v0.3.1` に更新。
 
 ### Fixed
 - Windows で Git モジュールを使うと、描画のたびに gix がシステムの Git 設定の場所を調べるため `git` を 2 回起動し、既定レイアウトの描画に約 130ms かかっていた問題を修正。システムの gitconfig のパスを 24 時間キャッシュして gix に渡し、システムの gitattributes は読み込まないようにした。既定レイアウトの描画時間は約 11〜16ms になった (#35)。

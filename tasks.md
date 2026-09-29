@@ -50,6 +50,7 @@
 
 - [x] Claude Code のレートリミット出力 ID を Squirrel Notifier の契約（`claude-code`）に合わせる (#28)
 - [x] v0.2.0 リリース（#24 完了後）
+- [x] v0.3.1 リリース（#35 の Windows 描画時間の改善）
 
 ## Squirrel Notifier 双方向連携
 
