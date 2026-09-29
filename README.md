@@ -51,7 +51,7 @@ Windows の検証環境で上記コマンドを実行した際、Microsoft Defen
 同じ環境では、Rust toolchain を使ってソースからインストールした場合、この検出は発生せず、Antigravity CLI、Claude Code、GitHub Copilot CLI の3クライアントで動作を確認しました。この結果は検証した環境でのものです。Cargo の利用には Rust toolchain が必要です。
 
 ```bash
-cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.3.0 --locked
+cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.3.1 --locked
 ```
 
 ### リリース公開後のバイナリ更新
