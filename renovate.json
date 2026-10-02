@@ -8,5 +8,17 @@
     "github>scottlz0310/renovate-config//presets/options/automerge",
     "github>scottlz0310/renovate-config//presets/options/schedule",
     "github>scottlz0310/renovate-config//presets/options/security"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Rust toolchain version pinned in GitHub Actions workflows",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*toolchain: (?<currentValue>\\S+)"
+      ]
+    }
   ]
 }

@@ -117,7 +117,7 @@ mod tests {
         let status = get_git_status(Path::new("."), GitQuery::default());
         assert!(status.branch.is_some());
         let b = status.branch.unwrap();
-        assert!(!b.is_empty());
+        assert_ne!(b, "");
         assert!(status.remote_repo.is_none());
     }
 
