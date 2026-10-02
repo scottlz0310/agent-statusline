@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1.42.0
         if: runner.os == 'Linux'
