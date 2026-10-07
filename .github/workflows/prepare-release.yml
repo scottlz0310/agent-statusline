@@ -12,7 +12,7 @@ permissions: {}
 
 jobs:
   prepare:
-    uses: scottlz0310/release-automate/.github/workflows/reusable-prepare-release.yml@fd3e676a431bbd6e189270e6911ec4c2307e9f2b # v2.0.0
+    uses: scottlz0310/release-automate/.github/workflows/reusable-prepare-release.yml@3b5092d9f1a7ed9f29fb33f6e598d1e8534bb8cf # v2.1.0
     secrets:
       RELEASE_BOT_APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
