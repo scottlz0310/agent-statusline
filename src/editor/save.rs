@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
@@ -182,38 +183,63 @@ fn write_replace(
     bytes: &[u8],
     rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), SaveError> {
-    let tmp = temp_path(real);
     let result = (|| {
-        write_new_file(&tmp, bytes)?;
+        let tmp = TempFile::create(real, bytes)?;
         if let Ok(meta) = std::fs::metadata(real) {
-            std::fs::set_permissions(&tmp, meta.permissions())?;
+            std::fs::set_permissions(&tmp.path, meta.permissions())?;
         }
-        rename(&tmp, real)
+        rename(&tmp.path, real)
     })();
-    if let Err(source) = result {
-        // 一時ファイルの掃除の失敗は、元のエラーを優先して報告する
-        let _ = std::fs::remove_file(&tmp);
-        return Err(SaveError::Io {
-            context: "設定ファイルを書き込めません（旧内容は保たれています）",
-            path: real.to_path_buf(),
-            source,
-        });
+    result.map_err(|source| SaveError::Io {
+        context: "設定ファイルを書き込めません（旧内容は保たれています）",
+        path: real.to_path_buf(),
+        source,
+    })
+}
+
+/// 保存先と同じディレクトリに、呼び出しごとに一意な名前で作る一時ファイル。
+/// 自分が作成したファイルだけを、成功・失敗のどちらでも取り除く（既存の同名ファイルには触れない）
+struct TempFile {
+    path: PathBuf,
+}
+
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+const MAX_TEMP_ATTEMPTS: u64 = 1000;
+
+impl TempFile {
+    fn create(target: &Path, bytes: &[u8]) -> io::Result<Self> {
+        Self::create_from(target, bytes, NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed))
     }
-    Ok(())
+
+    fn create_from(target: &Path, bytes: &[u8], start: u64) -> io::Result<Self> {
+        let name = target.file_name().map_or_else(
+            || "config.toml".into(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let pid = std::process::id();
+        for id in start..start + MAX_TEMP_ATTEMPTS {
+            let path = target.with_file_name(format!(".{name}.{pid}.{id}.tmp"));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    // 作成できた時点から、この値の Drop が取り除く
+                    let tmp = Self { path };
+                    file.write_all(bytes)?;
+                    file.sync_all()?;
+                    return Ok(tmp);
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Err(io::Error::other("一時ファイル名を決められません"))
+    }
 }
 
-fn temp_path(target: &Path) -> PathBuf {
-    let name = target.file_name().map_or_else(
-        || "config.toml".into(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    target.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
-}
-
-fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        // rename 済みなら既にない。掃除の失敗は、保存の成否に影響させない
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn save_missing(
@@ -234,11 +260,7 @@ fn save_missing(
             .map_err(io_error("ディレクトリを作成できません", parent))?;
     }
 
-    let tmp = temp_path(target);
-    let published = publish_new(&tmp, target, text.as_bytes(), hard_link);
-    // 一時ファイルは、成功・失敗のどちらでも残さない
-    let _ = std::fs::remove_file(&tmp);
-    published?;
+    publish_new(target, text.as_bytes(), hard_link)?;
 
     let real = std::fs::canonicalize(target)
         .map_err(io_error("保存した設定ファイルを解決できません", target))?;
@@ -255,29 +277,43 @@ fn save_missing(
 /// `hard_link` が使えないファイルシステムでは、`create_new` で `target` に直接書く。
 /// その場合、書き込み中の内容が他のプロセスから見える可能性がある
 fn publish_new(
-    tmp: &Path,
     target: &Path,
     bytes: &[u8],
     hard_link: &dyn Fn(&Path, &Path) -> io::Result<()>,
 ) -> Result<(), SaveError> {
-    write_new_file(tmp, bytes).map_err(io_error("一時ファイルを書き込めません", tmp))?;
-    match hard_link(tmp, target) {
+    let tmp = TempFile::create(target, bytes)
+        .map_err(io_error("一時ファイルを書き込めません", target))?;
+    match hard_link(&tmp.path, target) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             Err(SaveError::Conflict(ConflictKind::Created))
         }
-        Err(_) => match write_new_file(target, bytes) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                Err(SaveError::Conflict(ConflictKind::Created))
-            }
-            Err(err) => Err(io_error("設定ファイルを作成できません", target)(
-                err,
-            )),
-        },
+        Err(_) => create_target_directly(target, bytes),
     }
 }
 
+fn create_target_directly(target: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(target) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(SaveError::Conflict(ConflictKind::Created));
+        }
+        Err(err) => {
+            return Err(io_error("設定ファイルを作成できません", target)(
+                err,
+            ));
+        }
+    };
+    // 自分が作成したファイルだけを、書き込みに失敗したときに取り除く
+    if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(target);
+        return Err(io_error("設定ファイルを書き込めません", target)(
+            source,
+        ));
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -498,6 +534,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_temp_files_are_unique_and_foreign_files_are_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        let pid = std::process::id();
+
+        // 同じ名前の一時ファイルが既にあっても、触れずに別の名前を使う
+        for id in 0..5 {
+            std::fs::write(
+                dir.path().join(format!(".config.toml.{pid}.{id}.tmp")),
+                "foreign",
+            )
+            .unwrap();
+        }
+        let first = TempFile::create_from(&target, b"first", 0).unwrap();
+        let second = TempFile::create_from(&target, b"second", 0).unwrap();
+        assert_ne!(first.path, second.path);
+        assert_eq!(std::fs::read_to_string(&first.path).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&second.path).unwrap(), "second");
+
+        // 片方を取り除いても、もう片方と既存のファイルは残る
+        let first_path = first.path.clone();
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second.path.exists());
+        for id in 0..5 {
+            let foreign = dir.path().join(format!(".config.toml.{pid}.{id}.tmp"));
+            assert_eq!(std::fs::read_to_string(foreign).unwrap(), "foreign");
+        }
+    }
+
+    #[test]
+    fn test_save_never_removes_foreign_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        let plant = |dir: &Path| {
+            // 並行する保存や、前回の異常終了が残した同名の一時ファイル
+            for id in 0..300 {
+                std::fs::write(dir.join(format!(".config.toml.{pid}.{id}.tmp")), "foreign")
+                    .unwrap();
+            }
+        };
+        let assert_untouched = |dir: &Path| {
+            for id in 0..300 {
+                let content =
+                    std::fs::read_to_string(dir.join(format!(".config.toml.{pid}.{id}.tmp")));
+                assert_eq!(content.unwrap(), "foreign", "{id}");
+            }
+        };
+
+        // 既存のファイルの保存
+        let existing_dir = dir.path().join("existing");
+        std::fs::create_dir(&existing_dir).unwrap();
+        let path = existing_dir.join("config.toml");
+        std::fs::write(&path, "format = \"$plan\"\n").unwrap();
+        plant(&existing_dir);
+        save(&load(&path), NEW_TEXT, &env_with(&dir.path().join("h"))).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NEW_TEXT);
+        assert_untouched(&existing_dir);
+
+        // 未作成のファイルの保存（成功と、他で作られていた場合の競合）
+        let missing_dir = dir.path().join("missing");
+        std::fs::create_dir(&missing_dir).unwrap();
+        let target = missing_dir.join("config.toml");
+        plant(&missing_dir);
+        let source = load(&target);
+        save(&source, NEW_TEXT, &env_with(&dir.path().join("h"))).unwrap();
+        assert_untouched(&missing_dir);
+        let err = save(
+            &source,
+            "format = \"$plan\"\n",
+            &env_with(&dir.path().join("h")),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SaveError::Conflict(ConflictKind::Created)),
+            "{err}"
+        );
+        assert_untouched(&missing_dir);
+    }
     #[test]
     fn test_save_missing_creates_file_and_directories_without_history() {
         let dir = tempfile::tempdir().unwrap();
