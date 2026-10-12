@@ -1,9 +1,9 @@
-//! 設定 TUI（`agent-statusline config`）。現状は、配置の編集とプレビュー（設定 TUI フェーズ 1-1）。保存はまだできない。
+//! 設定 TUI（`agent-statusline config`）。現状は、配置の編集（部品の追加を含む）とプレビュー（設定 TUI フェーズ 1-2）。保存はまだできない。
 //!
-//! 状態遷移は `app`、画面は `view`、ANSI の変換は `ansi` に置き、ここは端末とイベントの入出力だけを行う。
+//! 状態遷移は `app`、部品一覧の項目は `palette`、画面は `view` に置き、ここは端末とイベントの入出力だけを行う。
 
-mod ansi;
 mod app;
+mod palette;
 mod view;
 
 use std::io::{self, IsTerminal, Write};
@@ -17,7 +17,7 @@ use ratatui::crossterm::style::Print;
 
 use crate::editor::layout::Layout;
 use crate::editor::load::{ConfigEnv, ConfigSource, load_config_strict};
-use app::{App, RenderMode};
+use app::App;
 use view::{RawOverlay, ViewContext, draw};
 
 pub fn run(config_path: Option<&Path>) -> io::Result<()> {
@@ -69,14 +69,11 @@ fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext) -> io::Result<(
     let mut app = App::new(Layout::parse(&ctx.config.format));
     while !app.should_quit {
         // 生 ANSI の出力は、ratatui が把握していない（差分描画で消えない）ので、毎回全体を描き直す
-        let needs_clear = std::mem::take(&mut app.needs_clear);
-        if needs_clear || app.render_mode == RenderMode::RawAnsi {
-            terminal.clear()?;
-        }
-        let mut overlay = None;
-        terminal.draw(|frame| overlay = draw(frame, &app, ctx))?;
-        if let Some(overlay) = overlay {
-            write_overlay(&overlay)?;
+        terminal.clear()?;
+        let mut overlays = Vec::new();
+        terminal.draw(|frame| overlays = draw(frame, &app, ctx))?;
+        for overlay in &overlays {
+            write_overlay(overlay)?;
         }
 
         // Windows ではキーの押下と解放の両方が届くので、押下だけを扱う
