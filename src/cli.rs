@@ -29,6 +29,13 @@ pub enum Commands {
         bench: bool,
     },
 
+    /// Preview the statusline configuration interactively (read-only)
+    Config {
+        /// Path to custom config file
+        #[arg(short, long)]
+        config: Option<std::path::PathBuf>,
+    },
+
     /// Automatically install statusline into agent settings
     Install {
         /// Target agents to install (comma-separated: agy, claude, copilot)
