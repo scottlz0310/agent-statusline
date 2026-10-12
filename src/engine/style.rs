@@ -44,40 +44,52 @@ pub fn pct_style_name<'a>(
     }
 }
 
-/// スタイル仕様文字列（例: "bold cyan", "red", "dimmed"）を ANSI コード群へパースする
-pub fn parse_style_tokens(style_spec: &str) -> Vec<u8> {
-    let mut codes = Vec::new();
-    for token in style_spec.split_whitespace() {
-        match token.to_ascii_lowercase().as_str() {
-            "bold" => codes.push(1),
-            "dimmed" => codes.push(2),
-            "italic" => codes.push(3),
-            "underline" => codes.push(4),
-            "inverted" => codes.push(7),
-            "black" => codes.push(30),
-            "red" => codes.push(31),
-            "green" => codes.push(32),
-            "yellow" => codes.push(33),
-            "blue" => codes.push(34),
-            "magenta" | "purple" => codes.push(35),
-            "cyan" => codes.push(36),
-            "white" => codes.push(37),
-            "gray" | "grey" => codes.push(90),
-            "bg:black" => codes.push(40),
-            "bg:red" => codes.push(41),
-            "bg:green" => codes.push(42),
-            "bg:yellow" => codes.push(43),
-            "bg:blue" => codes.push(44),
-            "bg:magenta" | "bg:purple" => codes.push(45),
-            "bg:cyan" => codes.push(46),
-            "bg:white" => codes.push(47),
-            "bg:gray" | "bg:grey" => codes.push(100),
-            _ => {}
-        }
-    }
-    codes
+/// スタイルのトークン 1 つに対応する ANSI コード。認識できなければ `None`
+fn style_code(token: &str) -> Option<u8> {
+    let code = match token.to_ascii_lowercase().as_str() {
+        "bold" => 1,
+        "dimmed" => 2,
+        "italic" => 3,
+        "underline" => 4,
+        "inverted" => 7,
+        "black" => 30,
+        "red" => 31,
+        "green" => 32,
+        "yellow" => 33,
+        "blue" => 34,
+        "magenta" | "purple" => 35,
+        "cyan" => 36,
+        "white" => 37,
+        "gray" | "grey" => 90,
+        "bg:black" => 40,
+        "bg:red" => 41,
+        "bg:green" => 42,
+        "bg:yellow" => 43,
+        "bg:blue" => 44,
+        "bg:magenta" | "bg:purple" => 45,
+        "bg:cyan" => 46,
+        "bg:white" => 47,
+        "bg:gray" | "bg:grey" => 100,
+        _ => return None,
+    };
+    Some(code)
 }
 
+/// スタイル仕様文字列（例: "bold cyan", "red", "dimmed"）を ANSI コード群へパースする。認識できないトークンは無視する
+pub fn parse_style_tokens(style_spec: &str) -> Vec<u8> {
+    style_spec
+        .split_whitespace()
+        .filter_map(style_code)
+        .collect()
+}
+
+/// スタイル仕様文字列の中の、認識できないトークン
+pub fn unknown_style_tokens(style_spec: &str) -> Vec<&str> {
+    style_spec
+        .split_whitespace()
+        .filter(|token| style_code(token).is_none())
+        .collect()
+}
 /// ANSI コード列を `\x1b[...m` 形式にフォーマットする
 pub fn style_to_ansi(codes: &[u8]) -> String {
     if codes.is_empty() {
