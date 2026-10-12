@@ -56,3 +56,15 @@
 
 - [x] レビュー依頼・キュー状態サマリ（`statusline-summary.json`）をカレントリポジトリ分だけ `$review` で表示 (#23)
 - [x] v0.3.0 リリース
+
+## 設定 TUI (`agent-statusline config`)
+
+基本設計: [docs/agent-statusline-config-tui-design.md](docs/agent-statusline-config-tui-design.md)
+
+- [x] 基本設計書の作成
+- [ ] 0-1: 描画を「収集」と「合成（純関数 `compose`）」に分離し、ゴールデンテストで出力一致を担保
+- [ ] 0-2: 部品レジストリ（`PartSpec` / `PropSpec`）の導入と整合テスト、`[directory] symbol` の追加
+- [ ] 0-3: 編集サービス（厳密な読み込み、配置モデル、TOML の部分更新、リンク経由の保存、外部変更検知、履歴）
+- [ ] 0-4: プレビュー基盤と PoC（TUI での ANSI 描画、絵文字の幅、折り返し、幅変更）
+- [ ] 1: TUI の MVP（配置、部品一覧、仮挿入プレビュー、プロパティ、絵文字の選択、保存）
+- [ ] 2: 仕上げ（TOML 表示と差分、履歴の復元、未認識キーの警告、マウス対応）

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- 設定を対話的に編集・プレビューする TUI（`agent-statusline config`）の基本設計書 `docs/agent-statusline-config-tui-design.md` を追加。実装は含まない。
+
 ## [0.3.1] - 2026-09-29
 
 ### Changed
