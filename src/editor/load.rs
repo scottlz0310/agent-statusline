@@ -125,13 +125,19 @@ pub fn load_config_strict(
         env.env_path.as_deref(),
         env.config_dir.as_deref(),
         env.home_dir.as_deref(),
-        Path::exists,
+        exists_or_is_link,
     );
     let requested = match resolved {
         Some(path) => path,
         None => default_config_path(env.config_dir.as_deref().ok_or(ConfigError::NoConfigDir)?),
     };
     load_from_path(&requested)
+}
+
+/// リンク切れのシンボリックリンクも「ある」とみなす。`Path::exists` はリンク先を辿るため、
+/// 標準パスがリンク切れだと、後続の探索先（`~/.config`）の別の設定を選んでしまう
+fn exists_or_is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 fn load_from_path(requested: &Path) -> Result<LoadedConfig, ConfigError> {
@@ -301,6 +307,31 @@ mod tests {
         let loaded = load_config_strict(None, &env).unwrap();
         assert_eq!(loaded.config.format, "$plan");
         assert!(matches!(loaded.source, ConfigSource::Existing { .. }));
+    }
+
+    #[test]
+    fn test_load_dangling_standard_link_wins_over_home_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        let standard = default_config_path(env.config_dir.as_deref().unwrap());
+        let fallback = default_config_path(&env.home_dir.as_deref().unwrap().join(".config"));
+        std::fs::create_dir_all(standard.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        std::fs::write(&fallback, "format = \"$plan\"").unwrap();
+        let target = dir.path().join("cloud").join("config.toml");
+        if !try_symlink(&target, &standard) {
+            return;
+        }
+
+        // 標準パスがリンク切れのときは、~/.config の別の設定ではなく、リンク先を保存先にする
+        let loaded = load_config_strict(None, &env).unwrap();
+        assert_eq!(loaded.source, ConfigSource::Missing { target });
+        assert_eq!(loaded.config.format, Config::default().format);
+
+        // 標準パスが存在しないときは、従来どおり ~/.config を読む
+        std::fs::remove_file(&standard).unwrap();
+        let loaded = load_config_strict(None, &env).unwrap();
+        assert_eq!(loaded.config.format, "$plan");
     }
 
     #[test]
