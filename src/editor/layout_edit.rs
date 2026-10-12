@@ -50,6 +50,15 @@ impl LayoutEditor {
         self.cursor
     }
 
+    /// 元に戻す履歴を持たない複製。仮の編集を試して表示するために使う
+    pub fn without_history(&self) -> Self {
+        Self {
+            layout: self.layout.clone(),
+            cursor: self.cursor,
+            undo: Vec::new(),
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -159,6 +168,20 @@ impl LayoutEditor {
             line: line + 1,
             index: 0,
         };
+    }
+
+    /// 選択中のトークンの後ろに改行を入れ、残りを次の行へ送る（選択は同じトークンのまま）。
+    /// 空の行では、空の行を 1 つ足す
+    pub fn break_line_after(&mut self) {
+        self.record();
+        let Cursor { line, index } = self.cursor;
+        let at = if self.selected().is_some() {
+            index + 1
+        } else {
+            0
+        };
+        let rest = self.layout.lines[line].split_off(at);
+        self.layout.lines.insert(line + 1, rest);
     }
 
     /// 末尾に空の行を足し、そこを選ぶ
@@ -562,6 +585,65 @@ $quota";
         assert_eq!(editor.layout().to_format(), "\n$directory \n$model\n");
         assert_eq!((editor.cursor().line, editor.cursor().index), (3, 0));
         assert_eq!(editor.selected(), None);
+    }
+
+    #[test]
+    fn test_break_line_after() {
+        // (名前, format, 初期の位置, 期待する format, 期待する選択)
+        let cases = [
+            (
+                "middle",
+                "$directory $model",
+                (0, 0),
+                "$directory
+ $model",
+                (0, 0),
+            ),
+            (
+                "last-token-adds-empty-line",
+                "$directory $model",
+                (0, 2),
+                "$directory $model
+",
+                (0, 2),
+            ),
+            (
+                "empty-line",
+                "$directory
+
+$quota",
+                (1, 0),
+                "$directory
+
+
+$quota",
+                (1, 0),
+            ),
+        ];
+        for (name, format, (line, index), expected, cursor) in cases {
+            let mut editor = editor(format);
+            at(&mut editor, line, index);
+            editor.break_line_after();
+            assert_eq!(editor.layout().to_format(), expected, "{name}");
+            assert_eq!(
+                (editor.cursor().line, editor.cursor().index),
+                cursor,
+                "{name}"
+            );
+            editor.undo();
+            assert_eq!(editor.layout().to_format(), format, "{name}: undo");
+        }
+    }
+
+    #[test]
+    fn test_without_history_drops_undo_only() {
+        let mut editor = editor("$directory");
+        editor.add_line();
+        let copy = editor.without_history();
+        assert!(!copy.can_undo());
+        assert_eq!(copy.layout(), editor.layout());
+        assert_eq!(copy.cursor(), editor.cursor());
+        assert!(editor.can_undo(), "元の履歴は残る");
     }
 
     #[test]

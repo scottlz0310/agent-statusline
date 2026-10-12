@@ -3,9 +3,10 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::editor::layout::Layout;
-use crate::editor::layout_edit::{Direction, LayoutEditor};
+use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
 use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
+use crate::tui::palette::{self, PaletteItem};
 
 /// プレビューの幅の選択。`Auto` は実端末の幅
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,31 +22,42 @@ const WIDTHS: [WidthChoice; 4] = [
     WidthChoice::Columns(160),
 ];
 
-/// プレビューの描画方式。生の ANSI は、ratatui の文字幅の計算を介さず端末へ直接出力する（絵文字の崩れの比較用）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderMode {
-    Ratatui,
-    RawAnsi,
-}
-
-/// キー入力の宛先。`Tab` で切り替える
+/// キー入力の宛先。`Tab` で、配置 → 部品一覧 → プレビューの順に切り替える
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Preview,
     Layout,
+    Parts,
+}
+
+impl Focus {
+    fn next(self) -> Self {
+        match self {
+            Self::Layout => Self::Parts,
+            Self::Parts => Self::Preview,
+            Self::Preview => Self::Layout,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Layout => Self::Preview,
+            Self::Parts => Self::Layout,
+            Self::Preview => Self::Parts,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct App {
     pub focus: Focus,
     pub editor: LayoutEditor,
+    pub palette: Vec<PaletteItem>,
+    palette_index: usize,
     scenario_index: usize,
     width_index: usize,
     pub overflow: Overflow,
-    pub render_mode: RenderMode,
     pub should_quit: bool,
-    /// 描画方式の切り替えなどで、画面全体を描き直す必要がある
-    pub needs_clear: bool,
 }
 
 impl App {
@@ -53,13 +65,32 @@ impl App {
         Self {
             focus: Focus::Layout,
             editor: LayoutEditor::new(layout),
+            palette: palette::items(),
+            palette_index: 0,
             scenario_index: 0,
             width_index: 0,
             overflow: Overflow::Truncate,
-            render_mode: RenderMode::Ratatui,
             should_quit: false,
-            needs_clear: false,
         }
+    }
+
+    pub fn palette_index(&self) -> usize {
+        self.palette_index
+    }
+
+    pub fn selected_item(&self) -> PaletteItem {
+        self.palette[self.palette_index]
+    }
+
+    /// 部品一覧にフォーカスがあるとき、選択中の項目を、配置のカーソルの後ろに仮に入れた状態。
+    /// 確定（`Enter`）するまで、`editor` は変わらない
+    pub fn tentative_editor(&self) -> Option<LayoutEditor> {
+        if self.focus != Focus::Parts {
+            return None;
+        }
+        let mut editor = self.editor.without_history();
+        palette::apply(self.selected_item(), &mut editor, Placement::After);
+        Some(editor)
     }
 
     pub fn scenario(&self) -> Scenario {
@@ -81,16 +112,13 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = match self.focus {
-                    Focus::Preview => Focus::Layout,
-                    Focus::Layout => Focus::Preview,
-                };
-            }
+            KeyCode::Tab => self.focus = self.focus.next(),
+            KeyCode::BackTab => self.focus = self.focus.previous(),
             KeyCode::Char('u') => self.editor.undo(),
             code => match self.focus {
                 Focus::Preview => self.handle_preview_key(code),
                 Focus::Layout => self.handle_layout_key(code, key.modifiers),
+                Focus::Parts => self.handle_parts_key(code),
             },
         }
     }
@@ -111,12 +139,22 @@ impl App {
                     Overflow::Truncate => Overflow::Wrap,
                 };
             }
-            KeyCode::Char('r') => {
-                self.render_mode = match self.render_mode {
-                    RenderMode::Ratatui => RenderMode::RawAnsi,
-                    RenderMode::RawAnsi => RenderMode::Ratatui,
-                };
-                self.needs_clear = true;
+            _ => {}
+        }
+    }
+
+    /// `Enter` は選択中のトークンの後ろへ、`i` は前へ追加する
+    fn handle_parts_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Up => self.palette_index = self.palette_index.saturating_sub(1),
+            KeyCode::Down => {
+                self.palette_index = (self.palette_index + 1).min(self.palette.len() - 1);
+            }
+            KeyCode::Enter => {
+                palette::apply(self.selected_item(), &mut self.editor, Placement::After);
+            }
+            KeyCode::Char('i') => {
+                palette::apply(self.selected_item(), &mut self.editor, Placement::Before);
             }
             _ => {}
         }
@@ -151,6 +189,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::layout::Token;
     use crate::editor::layout_edit::Cursor;
 
     fn app(format: &str) -> App {
@@ -177,24 +216,30 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_toggles_focus_and_routes_keys() {
+    fn test_tab_cycles_focus_and_routes_keys() {
         let mut app = app("$directory $model");
         // 配置にフォーカスがあるとき、矢印は選択を動かし、シナリオは変わらない
         press(&mut app, KeyCode::Right);
         assert_eq!(app.editor.cursor(), Cursor { line: 0, index: 1 });
         assert_eq!(app.scenario(), Scenario::ALL[0]);
 
-        for key in [KeyCode::Tab, KeyCode::BackTab] {
-            press(&mut app, key);
-            assert_eq!(app.focus, Focus::Preview, "{key:?}");
-            // プレビューにフォーカスがあるとき、矢印はシナリオを動かし、選択は変わらない
-            press(&mut app, KeyCode::Right);
-            assert_eq!(app.scenario(), Scenario::ALL[1], "{key:?}");
-            press(&mut app, KeyCode::Left);
-            assert_eq!(app.editor.cursor(), Cursor { line: 0, index: 1 }, "{key:?}");
-            press(&mut app, key);
-            assert_eq!(app.focus, Focus::Layout, "{key:?}");
+        // Tab: 配置 → 部品一覧 → プレビュー → 配置
+        for expected in [Focus::Parts, Focus::Preview, Focus::Layout] {
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.focus, expected);
         }
+        // BackTab は逆順
+        for expected in [Focus::Preview, Focus::Parts, Focus::Layout] {
+            press(&mut app, KeyCode::BackTab);
+            assert_eq!(app.focus, expected);
+        }
+
+        // プレビューにフォーカスがあるとき、矢印はシナリオを動かし、選択は変わらない
+        app.focus = Focus::Preview;
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.scenario(), Scenario::ALL[1]);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.editor.cursor(), Cursor { line: 0, index: 1 });
     }
 
     #[test]
@@ -237,34 +282,102 @@ mod tests {
         assert_eq!(app.overflow, Overflow::Wrap);
         press(&mut app, KeyCode::Char('o'));
         assert_eq!(app.overflow, Overflow::Truncate);
-
-        assert!(!app.needs_clear);
-        press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.render_mode, RenderMode::RawAnsi);
-        assert!(app.needs_clear, "描画方式を変えたら、全体を描き直す");
-        press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.render_mode, RenderMode::Ratatui);
     }
 
     #[test]
     fn test_preview_keys_do_nothing_on_layout_focus() {
         let mut app = app("$model");
-        for key in [KeyCode::Char('w'), KeyCode::Char('o'), KeyCode::Char('r')] {
+        for key in [KeyCode::Char('w'), KeyCode::Char('o')] {
             press(&mut app, key);
         }
         assert_eq!(app.width_choice(), WidthChoice::Auto);
         assert_eq!(app.overflow, Overflow::Truncate);
-        assert_eq!(app.render_mode, RenderMode::Ratatui);
     }
 
     #[test]
-    fn test_layout_keys_do_nothing_on_preview_focus() {
-        let mut app = app_with_focus("$directory $model", Focus::Preview);
-        for key in [KeyCode::Char('d'), KeyCode::Char('n'), KeyCode::Char('a')] {
-            press(&mut app, key);
+    fn test_layout_keys_do_nothing_on_other_focus() {
+        for focus in [Focus::Preview, Focus::Parts] {
+            let mut app = app_with_focus("$directory $model", focus);
+            for key in [KeyCode::Char('d'), KeyCode::Char('n'), KeyCode::Char('a')] {
+                press(&mut app, key);
+            }
+            assert_eq!(
+                app.editor.layout().to_format(),
+                "$directory $model",
+                "{focus:?}"
+            );
+            assert!(!app.editor.can_undo(), "{focus:?}");
         }
-        assert_eq!(app.editor.layout().to_format(), "$directory $model");
+    }
+
+    /// 部品一覧の `target` の項目まで、`Down` で進める
+    fn select_item(app: &mut App, target: PaletteItem) {
+        while app.selected_item() != target {
+            press(app, KeyCode::Down);
+        }
+    }
+
+    #[test]
+    fn test_parts_navigation_clamps_at_both_ends() {
+        let mut app = app_with_focus("$model", Focus::Parts);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.palette_index(), 0);
+        for _ in 0..app.palette.len() + 3 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.palette_index(), app.palette.len() - 1);
+        assert_eq!(app.selected_item(), PaletteItem::LineBreak);
+    }
+
+    #[test]
+    fn test_parts_enter_inserts_after_and_i_inserts_before() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        select_item(&mut app, PaletteItem::Part("quota"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.editor.layout().to_format(), "$directory$quota");
+        // 追加したトークンが選ばれるので、続けて Enter を押すと、その後ろへ足される
+        select_item(&mut app, PaletteItem::Literal(" | "));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.editor.layout().to_format(), "$directory$quota | ");
+        // `i` は、選択中のトークンの前
+        select_item(&mut app, PaletteItem::LineBreak);
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(
+            app.editor.layout().to_format(),
+            "$directory$quota
+ | "
+        );
+        // 元に戻す（フォーカスによらない）
+        for expected in ["$directory$quota | ", "$directory$quota", "$directory"] {
+            press(&mut app, KeyCode::Char('u'));
+            assert_eq!(app.editor.layout().to_format(), expected);
+        }
+    }
+
+    #[test]
+    fn test_tentative_editor_does_not_change_the_layout() {
+        let mut app = app("$directory");
+        assert!(
+            app.tentative_editor().is_none(),
+            "部品一覧にフォーカスがないとき"
+        );
+
+        app.focus = Focus::Parts;
+        select_item(&mut app, PaletteItem::Part("model"));
+        let tentative = app.tentative_editor().expect("仮挿入がある");
+        assert_eq!(tentative.layout().to_format(), "$directory$model");
+        assert_eq!(
+            tentative.selected(),
+            Some(&Token::Part("model".to_string()))
+        );
+        // 確定するまで、設定の配置も履歴も変わらない
+        assert_eq!(app.editor.layout().to_format(), "$directory");
         assert!(!app.editor.can_undo());
+
+        // カーソルを動かすと、仮挿入も追従する
+        press(&mut app, KeyCode::Up);
+        let tentative = app.tentative_editor().unwrap();
+        assert_eq!(tentative.layout().to_format(), "$directory$sandbox");
     }
 
     #[test]
@@ -301,7 +414,7 @@ mod tests {
         assert!(!unassigned.should_quit, "未割り当てのキーは何もしない");
         assert!(!unassigned.editor.can_undo());
         for key in [KeyCode::Char('q'), KeyCode::Esc] {
-            for focus in [Focus::Preview, Focus::Layout] {
+            for focus in [Focus::Preview, Focus::Layout, Focus::Parts] {
                 let mut app = app_with_focus("$model", focus);
                 press(&mut app, key);
                 assert!(app.should_quit, "{key:?}/{focus:?}");
