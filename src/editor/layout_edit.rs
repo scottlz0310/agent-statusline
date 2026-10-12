@@ -128,6 +128,8 @@ impl LayoutEditor {
             line: target_line,
             index: target_index,
         };
+        // 取り除いた部品の両隣にあった固定テキストが、移動元で隣り合う
+        self.merge_adjacent_literals(line);
         self.merge_adjacent_literals(target_line);
     }
 
@@ -490,6 +492,43 @@ $quota
         assert_eq!(editor.layout().to_format(), "$directory-+");
         assert_eq!(editor.layout().lines[0].len(), 2);
         assert_eq!(editor.selected(), Some(&lit("-+")));
+    }
+
+    #[test]
+    fn test_move_across_lines_merges_literals_at_source() {
+        // (名前, 方向)。`$model` は固定テキスト `-` と `+` に挟まれている
+        for (name, direction) in [("down", Direction::Down), ("right-edge", Direction::Right)] {
+            let original = "$directory-$model+
+$quota";
+            let mut editor = editor(original);
+            at(&mut editor, 0, 2);
+            if name == "right-edge" {
+                // 行の右端へ寄せてから、次の行へ送る
+                editor.move_selected(Direction::Right);
+                editor.move_selected(Direction::Right);
+            }
+            editor.move_selected(direction);
+            let layout = editor.layout().clone();
+            assert_eq!(
+                layout,
+                Layout::parse(&layout.to_format()),
+                "{name}: 編集後の配置と、書いて読み直した配置が一致する"
+            );
+            assert!(
+                layout.lines[0].contains(&lit("-+")) || layout.lines[0].contains(&lit("+-")),
+                "{name}: 移動元の固定テキストが 1 つにまとまる: {:?}",
+                layout.lines[0]
+            );
+
+            // 元の位置へ戻す操作と、元に戻す操作で、構造が崩れない
+            editor.move_selected(Direction::Up);
+            let layout = editor.layout().clone();
+            assert_eq!(layout, Layout::parse(&layout.to_format()), "{name}: up");
+            while editor.can_undo() {
+                editor.undo();
+            }
+            assert_eq!(editor.layout(), &Layout::parse(original), "{name}: undo");
+        }
     }
 
     #[test]
