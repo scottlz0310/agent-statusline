@@ -5,6 +5,7 @@ mod engine;
 mod installer;
 mod model;
 mod modules;
+mod preview;
 mod sink;
 mod updater;
 
