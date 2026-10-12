@@ -39,10 +39,18 @@ pub fn run(config_path: Option<&Path>) -> io::Result<()> {
         source_label: &label,
     };
 
+    enable_color_output();
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &ctx);
     ratatui::restore();
     result
+}
+
+/// プレビューは、`NO_COLOR` が設定されていても色つきで出す。
+/// ratatui（crossterm）は `NO_COLOR` で色を出さなくなるが、ステータスライン本体（`render`）は
+/// `NO_COLOR` に関係なく色つきで出力するので、無効のままだと実際の表示と食い違う
+fn enable_color_output() {
+    ratatui::crossterm::style::force_color_output(true);
 }
 
 /// 対話的な端末でなければ、キー入力を待ち続けずに、すぐ失敗する
@@ -99,7 +107,17 @@ fn write_overlay(overlay: &RawOverlay) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::style::{Color, Colored};
+
     use super::*;
+
+    #[test]
+    fn test_enable_color_output_overrides_no_color() {
+        // `NO_COLOR` の有無にかかわらず、有効になる
+        enable_color_output();
+        let sequence = Colored::ForegroundColor(Color::DarkCyan).to_string();
+        assert!(!sequence.is_empty(), "色の指定が出力されない");
+    }
 
     #[test]
     fn test_ensure_interactive() {
