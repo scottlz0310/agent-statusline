@@ -23,8 +23,8 @@ $ErrorActionPreference = "Stop"
 # 値の更新は「抽出して減った」「意図して増やす」のいずれかを PR で説明できるときだけ行う。
 $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力。
-    # 301: 設定 TUI の `mod editor;` の追加（ロジックは追加していない）
-    "src/main.rs" = 301
+    # 301: 設定 TUI の `mod editor;`、302: `mod preview;` の追加（ロジックは追加していない）
+    "src/main.rs" = 302
     # clap CLI 引数定義
     "src/cli.rs"  = 114
 }
