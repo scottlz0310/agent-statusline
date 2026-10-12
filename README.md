@@ -171,6 +171,8 @@ agent-statusline render --agent copilot
 
 リリース手順と現在の配布ターゲットも仕様書に記載しています。
 
+設定を対話的に編集・プレビューする `agent-statusline config`（TUI）の基本設計は [docs/agent-statusline-config-tui-design.md](docs/agent-statusline-config-tui-design.md) にあります（未実装）。
+
 ---
 
 ## 開発
