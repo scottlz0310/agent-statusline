@@ -126,7 +126,7 @@ symbol = "📁 "
 format = "$symbol[$folder]($folder_style) [$path]($path_style) "
 folder_style = "bold cyan"
 path_style = "dimmed"
-truncation_mode = "middle" # 中間省略 (/foo/.../bar)
+truncation_mode = "middle" # "middle": 中間省略 (/foo/.../bar) / "left": 先頭省略 (.../foo/bar)
 
 [git_branch]
 symbol = "🌿 "
