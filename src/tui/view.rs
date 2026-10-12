@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::engine::config::Config;
 use crate::engine::parts::part_ids;
-use crate::preview::width::{Overflow, fit_line};
+use crate::preview::width::{Overflow, display_width, fit_line};
 use crate::preview::{render_part_sample, render_preview};
 use crate::tui::ansi::ansi_line;
 use crate::tui::app::{App, RenderMode, WidthChoice};
@@ -120,9 +120,31 @@ fn draw_preview(
             x: inner.x,
             y: inner.y,
             width: inner.width,
-            lines: lines.to_vec(),
+            lines: clip_to_area(lines, inner),
         }),
     }
+}
+
+/// 生 ANSI で端末へ直接出す行を、枠の内側（`area`）に収める。
+/// 行数は高さまで、各行は幅までにし、幅より広い 1 文字しか入らない行は空にする。
+/// ratatui を介さないので、はみ出すと枠や部品の表示を上書きしてしまう
+fn clip_to_area(lines: &[String], area: Rect) -> Vec<String> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let width = usize::from(area.width);
+    lines
+        .iter()
+        .take(usize::from(area.height))
+        .map(|line| {
+            let clipped = fit_line(line, width, Overflow::Truncate).swap_remove(0);
+            if display_width(&clipped) <= width {
+                clipped
+            } else {
+                String::new()
+            }
+        })
+        .collect()
 }
 
 fn draw_parts(frame: &mut Frame, app: &App, config: &Config, area: Rect, columns: usize) {
@@ -154,7 +176,6 @@ mod tests {
     use ratatui::crossterm::event::KeyCode;
 
     use super::*;
-    use crate::preview::width::display_width;
 
     /// 画面の文字（左上から右下）を行ごとに返す。全角文字の 2 セル目（空）は飛ばす
     fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -251,6 +272,86 @@ mod tests {
         }
         // 部品のサンプルは、これまでどおり ratatui で描く
         assert!(screen[7..].join("\n").contains("myproject"), "{text}");
+    }
+
+    #[test]
+    fn test_raw_overlay_stays_inside_the_preview_area() {
+        // 小さい端末・縮小リサイズでも、生 ANSI の出力は枠の内側（行数・各行の幅）に収まる
+        let sizes = [
+            (1, 1),
+            (3, 24),
+            (10, 5),
+            (20, 8),
+            (100, 5),
+            (60, 12),
+            (100, 24),
+        ];
+        for (width, height) in sizes {
+            for steps in 0..8 {
+                let mut app = App::new();
+                app.handle_key(KeyCode::Char('r'));
+                for _ in 0..steps {
+                    app.handle_key(KeyCode::Right);
+                }
+                let (_, overlay) = render(&app, width, height);
+                let overlay = overlay.expect("生 ANSI の出力がある");
+                let (cols, rows) = (usize::from(overlay.width), overlay.lines.len());
+                assert!(
+                    overlay.x + overlay.width <= width,
+                    "{width}x{height}: {overlay:?}"
+                );
+                assert!(
+                    overlay.lines.is_empty() || overlay.y + u16::try_from(rows).unwrap() <= height,
+                    "{width}x{height}/{steps}: 行数 {rows} が高さを超える"
+                );
+                for line in &overlay.lines {
+                    assert!(
+                        display_width(line) <= cols,
+                        "{width}x{height}/{steps}: {line:?} が幅 {cols} を超える"
+                    );
+                }
+                if overlay.width == 0 {
+                    assert!(
+                        overlay.lines.is_empty(),
+                        "{width}x{height}: 幅 0 では出力しない"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clip_to_area() {
+        let line = |s: &str| s.to_string();
+        let lines = [line("abcdef"), line("🌿🌿🌿"), line("xy"), line("z")];
+        let area = |width, height| Rect::new(0, 0, width, height);
+        // (名前, 領域の幅, 高さ, 期待する結果)
+        let cases: [(&str, u16, u16, Vec<String>); 5] = [
+            ("fits", 10, 4, lines.to_vec()),
+            (
+                "height-limited",
+                10,
+                2,
+                vec![line("abcdef"), line("🌿🌿🌿")],
+            ),
+            (
+                "width-limited",
+                3,
+                4,
+                vec![line("abc"), line("🌿"), line("xy"), line("z")],
+            ),
+            // 幅 1 の領域に、幅 2 の絵文字は入らない: 空にする
+            ("char-wider-than-area", 1, 2, vec![line("a"), line("")]),
+            ("empty-area", 0, 3, vec![]),
+        ];
+        for (name, width, height, expected) in cases {
+            assert_eq!(
+                clip_to_area(&lines, area(width, height)),
+                expected,
+                "{name}"
+            );
+        }
+        assert_eq!(clip_to_area(&lines, area(5, 0)), Vec::<String>::new());
     }
 
     #[test]
