@@ -1,5 +1,6 @@
 mod adapter;
 mod cli;
+mod editor;
 mod engine;
 mod installer;
 mod model;
