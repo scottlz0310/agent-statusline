@@ -12,6 +12,7 @@ pub mod width;
 use crate::engine::config::Config;
 use crate::engine::formatter::compose;
 use crate::engine::parts::{PartInput, find};
+use crate::engine::style::render_styled_text;
 use scenario::Scenario;
 use width::{Overflow, fit_output};
 
@@ -33,7 +34,7 @@ pub fn render_preview(
     fit_output(&output, columns, overflow)
 }
 
-/// 部品 1 つの表示例（部品一覧に並べる短い表示）。何も表示されないときは空文字列
+/// 部品 1 つの表示例（部品一覧に並べる短い表示。ANSI の装飾つき）。何も表示されないときは空文字列
 pub fn render_part_sample(
     config: &Config,
     scenario: Scenario,
@@ -48,7 +49,8 @@ pub fn render_part_sample(
         reviews: &inputs.reviews,
         terminal_width: columns,
     };
-    Some((part.render)(config, &input))
+    // 全体のプレビュー（compose）と同じく、[text](style) を装飾へ変換する
+    Some(render_styled_text(&(part.render)(config, &input)))
 }
 
 #[cfg(test)]
@@ -207,6 +209,36 @@ mod tests {
             render_part_sample(&disabled, Scenario::Normal, "model", 120).as_deref(),
             Some("")
         );
+    }
+
+    #[test]
+    fn test_part_samples_apply_styles_like_the_full_preview() {
+        let sample = |config: &Config, id: &str| {
+            render_part_sample(config, Scenario::Normal, id, 120).unwrap()
+        };
+        // 既定のスタイル: テンプレート構文（`[text](style)`）を露出せず、装飾に変換する
+        let default = Config::default();
+        assert_eq!(sample(&default, "git_branch"), "\x1b[32m🌿 main\x1b[0m ");
+        assert!(sample(&default, "model").contains("\x1b[35m"));
+
+        // 変更したスタイルも反映される
+        let mut custom = Config::default();
+        custom.git_branch.style = "bold red".to_string();
+        assert_eq!(sample(&custom, "git_branch"), "\x1b[1;31m🌿 main\x1b[0m ");
+
+        // 全部品・全シナリオで、全体のプレビューと同じ結果になる（末尾の空白を除く）
+        for id in part_ids() {
+            for scenario in Scenario::ALL {
+                let config = Config {
+                    format: format!("${id}"),
+                    ..Config::default()
+                };
+                let expected = render_preview(&config, scenario, 120, Overflow::Truncate);
+                let actual = render_part_sample(&config, scenario, id, 120).unwrap();
+                assert_eq!(expected.join("\n"), actual.trim_end(), "{scenario:?}/{id}");
+                assert!(!actual.contains("]("), "{scenario:?}/{id}: {actual:?}");
+            }
+        }
     }
 
     #[test]
