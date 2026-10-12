@@ -216,7 +216,7 @@ Token  = Part(id) | Literal(String)
 │ symbol 🌿 [絵文字を選ぶ]   style green [色を選ぶ]   disabled ☐         │
 │ format [$symbol$branch]($style)  ← 詳細（変数の補完と検証つき）         │
 └──────────────────────────────────────────────────────────────────────┘
- Tab:移動  Enter:追加/編集  ←→:順序  d:削除  u:元に戻す  t:TOML  s:保存  ?:ヘルプ
+ Tab:移動  Enter:追加/編集  Shift+矢印:順序  d:削除  u:元に戻す  t:TOML  s:保存  ?:ヘルプ
 ```
 
 - プレビューは常に最上部に置き、操作の結果が即座に見えるようにする。

@@ -1,4 +1,4 @@
-//! 設定 TUI（`agent-statusline config`）。現状は、プレビュー専用のビューア（設定 TUI フェーズ 0-4b の試作）。
+//! 設定 TUI（`agent-statusline config`）。現状は、配置の編集とプレビュー（設定 TUI フェーズ 1-1）。保存はまだできない。
 //!
 //! 状態遷移は `app`、画面は `view`、ANSI の変換は `ansi` に置き、ここは端末とイベントの入出力だけを行う。
 
@@ -15,6 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::queue;
 use ratatui::crossterm::style::Print;
 
+use crate::editor::layout::Layout;
 use crate::editor::load::{ConfigEnv, ConfigSource, load_config_strict};
 use app::{App, RenderMode};
 use view::{RawOverlay, ViewContext, draw};
@@ -65,7 +66,7 @@ fn ensure_interactive(stdin_is_terminal: bool, stdout_is_terminal: bool) -> io::
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext) -> io::Result<()> {
-    let mut app = App::new();
+    let mut app = App::new(Layout::parse(&ctx.config.format));
     while !app.should_quit {
         // 生 ANSI の出力は、ratatui が把握していない（差分描画で消えない）ので、毎回全体を描き直す
         let needs_clear = std::mem::take(&mut app.needs_clear);
@@ -82,7 +83,7 @@ fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext) -> io::Result<(
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            app.handle_key(key.code);
+            app.handle_key(key);
         }
     }
     Ok(())

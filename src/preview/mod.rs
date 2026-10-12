@@ -9,12 +9,13 @@
 pub mod scenario;
 pub mod width;
 
+use crate::editor::layout::{Layout, Token};
 use crate::engine::config::Config;
 use crate::engine::formatter::compose;
 use crate::engine::parts::{PartInput, find};
 use crate::engine::style::render_styled_text;
 use scenario::Scenario;
-use width::{Overflow, fit_output};
+use width::{Overflow, fit_output, strip_ansi};
 
 /// 全体のプレビュー。`columns` は、`compose` に渡す端末幅と、折り返し・切り詰めの幅を兼ねる
 pub fn render_preview(
@@ -53,11 +54,56 @@ pub fn render_part_sample(
     Some(render_styled_text(&(part.render)(config, &input)))
 }
 
+/// 配置の 1 行について、非表示の部品と、行そのものが出力されるか（設計書 §6.5）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineVisibility {
+    /// トークンごと。何も表示しない部品は `true`（固定テキストは常に `false`）
+    pub hidden: Vec<bool>,
+    /// 行全体が空になり、描画から除かれる
+    pub blank: bool,
+}
+
+pub fn layout_visibility(
+    config: &Config,
+    scenario: Scenario,
+    layout: &Layout,
+    columns: usize,
+) -> Vec<LineVisibility> {
+    layout
+        .lines
+        .iter()
+        .map(|line| {
+            let mut text = String::new();
+            let hidden = line
+                .iter()
+                .map(|token| match token {
+                    Token::Literal(literal) => {
+                        text.push_str(literal);
+                        false
+                    }
+                    Token::Part(id) => {
+                        let sample = render_part_sample(config, scenario, id, columns)
+                            .map(|sample| strip_ansi(&sample))
+                            .unwrap_or_default();
+                        text.push_str(&sample);
+                        sample.trim().is_empty()
+                    }
+                })
+                .collect();
+            LineVisibility {
+                hidden,
+                // `compose` と同じく、行末の空白を除いて空かどうかを見る
+                blank: text.trim_end().is_empty(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::parts::part_ids;
-    use width::{display_width, strip_ansi};
+    use width::display_width;
 
     fn plain_lines(config: &Config, scenario: Scenario, columns: usize) -> Vec<String> {
         render_preview(config, scenario, columns, Overflow::Truncate)
@@ -258,6 +304,53 @@ mod tests {
         let labels: Vec<&str> = Scenario::ALL.iter().map(|s| s.label()).collect();
         for (i, label) in labels.iter().enumerate() {
             assert!(!labels[..i].contains(label), "{label}");
+        }
+    }
+
+    /// 1 行ぶんの期待値: (トークンごとの非表示, 行が空か)
+    type ExpectedLine = (&'static [bool], bool);
+
+    #[test]
+    fn test_layout_visibility() {
+        let config = Config::default();
+        let cases: [(&str, &str, &[ExpectedLine]); 4] = [
+            (
+                "all-visible",
+                "$directory $model",
+                &[(&[false, false, false], false)],
+            ),
+            (
+                // 通常のシナリオでは、レビューは表示されない。行の固定テキストが空白だけなら、行も出力されない
+                "hidden-part-and-blank-line",
+                "$review $review
+$model",
+                &[(&[true, false, true], true), (&[false], false)],
+            ),
+            (
+                // 固定テキストが残る行は出力される
+                "literal-keeps-line",
+                "$review |",
+                &[(&[true, false], false)],
+            ),
+            (
+                "empty-line",
+                "$model
+",
+                &[(&[false], false), (&[], true)],
+            ),
+        ];
+        for (name, format, expected) in cases {
+            let visibility =
+                layout_visibility(&config, Scenario::Normal, &Layout::parse(format), 100);
+            let actual: Vec<(Vec<bool>, bool)> = visibility
+                .into_iter()
+                .map(|line| (line.hidden, line.blank))
+                .collect();
+            let expected: Vec<(Vec<bool>, bool)> = expected
+                .iter()
+                .map(|(hidden, blank)| (hidden.to_vec(), *blank))
+                .collect();
+            assert_eq!(actual, expected, "{name}");
         }
     }
 }

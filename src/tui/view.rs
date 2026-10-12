@@ -1,17 +1,18 @@
-//! プレビュービューアの画面。状態（`App`）と設定から、描画だけを行う。
+//! 設定 TUI の画面。状態（`App`）と設定から、描画だけを行う。
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+use crate::editor::layout::Token;
 use crate::engine::config::Config;
 use crate::engine::parts::part_ids;
 use crate::preview::width::{Overflow, display_width, fit_line};
-use crate::preview::{render_part_sample, render_preview};
+use crate::preview::{layout_visibility, render_part_sample, render_preview};
 use crate::tui::ansi::ansi_line;
-use crate::tui::app::{App, RenderMode, WidthChoice};
+use crate::tui::app::{App, Focus, RenderMode, WidthChoice};
 
 /// プレビューの最大の表示行数。それ以上は、切り詰めて表示する
 const MAX_PREVIEW_ROWS: usize = 8;
@@ -32,6 +33,10 @@ pub struct RawOverlay {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Option<RawOverlay> {
+    // 編集中の配置を、設定の `format` として描画する（保存するまで、設定ファイルは変わらない）
+    let mut edited = ctx.config.clone();
+    edited.format = app.editor.layout().to_format();
+    let config = &edited;
     let area = frame.area();
     // uto は、プレビューの枠の内側に収まる幅（実端末の幅から枠を除いたもの）
     let inner_width = usize::from(area.width).saturating_sub(2);
@@ -39,7 +44,7 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Option<RawOverla
 
     // 指定した幅が実端末より広いときは、横を切り詰めて表示する
     let too_wide = columns > inner_width;
-    let lines: Vec<String> = render_preview(ctx.config, app.scenario(), columns, app.overflow)
+    let lines: Vec<String> = render_preview(config, app.scenario(), columns, app.overflow)
         .into_iter()
         .flat_map(|line| {
             if too_wide {
@@ -52,17 +57,19 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Option<RawOverla
         .collect();
     let preview_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
 
-    let [header, preview, parts, footer] = Layout::vertical([
+    let [header, preview, middle, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .areas(area);
+    let [layout_area, parts] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(middle);
 
     frame.render_widget(
         Line::from(format!(
-            "agent-statusline config — プレビュー（読み取り専用）  設定: {}",
+            "agent-statusline config — 配置の編集（まだ保存できません）  設定: {}",
             ctx.source_label
         ))
         .style(Style::default().add_modifier(Modifier::BOLD)),
@@ -70,13 +77,34 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Option<RawOverla
     );
 
     let overlay = draw_preview(frame, app, preview, &lines, columns, too_wide);
+    draw_layout(frame, app, ctx.config, layout_area, columns);
     draw_parts(frame, app, ctx.config, parts, columns);
     frame.render_widget(
-        Line::from("←/→ Tab: シナリオ  w: 幅  o: 折り返し/切り詰め  r: 描画方式（ratatui/生 ANSI）  q: 終了")
-            .style(Style::default().add_modifier(Modifier::DIM)),
+        Line::from(footer_text(app.focus)).style(Style::default().add_modifier(Modifier::DIM)),
         footer,
     );
     overlay
+}
+
+fn footer_text(focus: Focus) -> &'static str {
+    match focus {
+        Focus::Layout => {
+            "Tab: プレビュー  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す  q: 終了"
+        }
+        Focus::Preview => {
+            "Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  r: 描画方式  u: 戻す  q: 終了"
+        }
+    }
+}
+
+/// フォーカスのある枠は、色を付けて示す
+fn focus_block(title: String, focused: bool) -> Block<'static> {
+    let block = Block::bordered().title(title);
+    if focused {
+        block.border_style(Style::default().fg(Color::Cyan))
+    } else {
+        block
+    }
 }
 
 fn draw_preview(
@@ -99,10 +127,13 @@ fn draw_preview(
         RenderMode::Ratatui => "ratatui",
         RenderMode::RawAnsi => "生 ANSI",
     };
-    let mut block = Block::bordered().title(format!(
-        " プレビュー ─ 幅: {width} ─ シナリオ: {} ─ {overflow} ─ 描画: {mode} ",
-        app.scenario().label()
-    ));
+    let mut block = focus_block(
+        format!(
+            " プレビュー ─ 幅: {width} ─ シナリオ: {} ─ {overflow} ─ 描画: {mode} ",
+            app.scenario().label()
+        ),
+        app.focus == Focus::Preview,
+    );
     if too_wide {
         block =
             block.title_bottom(" 指定した幅が実端末より広いため、横を切り詰めて表示しています ");
@@ -147,6 +178,58 @@ fn clip_to_area(lines: &[String], area: Rect) -> Vec<String> {
         .collect()
 }
 
+/// 配置の編集領域。行ごとに、部品と固定テキストを並べ、選択中のトークンを反転する。
+/// 何も表示しない部品は薄く示し、出力されない行にはその旨を添える（設計書 §6.5）
+fn draw_layout(frame: &mut Frame, app: &App, config: &Config, area: Rect, columns: usize) {
+    let focused = app.focus == Focus::Layout;
+    let block = focus_block(" 配置 ".to_string(), focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let layout = app.editor.layout();
+    let cursor = app.editor.cursor();
+    let visibility = layout_visibility(config, app.scenario(), layout, columns);
+
+    let rows: Vec<Line> = layout
+        .lines
+        .iter()
+        .zip(&visibility)
+        .enumerate()
+        .map(|(line_index, (tokens, visibility))| {
+            let mut spans = vec![Span::raw(format!("{:>2}: ", line_index + 1))];
+            for (index, (token, hidden)) in tokens.iter().zip(&visibility.hidden).enumerate() {
+                let mut style = if *hidden { dim } else { Style::default() };
+                if (cursor.line, cursor.index) == (line_index, index) {
+                    style = style.add_modifier(if focused {
+                        Modifier::REVERSED
+                    } else {
+                        Modifier::UNDERLINED
+                    });
+                }
+                spans.push(Span::styled(token_label(token), style));
+                spans.push(Span::raw(" "));
+            }
+            if tokens.is_empty() {
+                spans.push(Span::styled("（空の行）", dim));
+            }
+            if visibility.blank {
+                spans.push(Span::styled(" ← この行は出力されません", dim));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// 部品は ID、固定テキストは引用符で囲み、空白は `␣` にして、見分けられるようにする
+fn token_label(token: &Token) -> String {
+    match token {
+        Token::Part(id) => id.clone(),
+        Token::Literal(text) => format!("\"{}\"", text.replace(' ', "␣")),
+    }
+}
+
 fn draw_parts(frame: &mut Frame, app: &App, config: &Config, area: Rect, columns: usize) {
     let block = Block::bordered().title(format!(" 部品 ─ {}のサンプル ", app.scenario().label()));
     let inner = block.inner(area);
@@ -173,9 +256,27 @@ fn draw_parts(frame: &mut Frame, app: &App, config: &Config, area: Rect, columns
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::KeyCode;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
     use super::*;
+    use crate::editor::layout::Layout as FormatLayout;
+    use crate::engine::config::DEFAULT_FORMAT;
+
+    fn new_app() -> App {
+        App::new(FormatLayout::parse(DEFAULT_FORMAT))
+    }
+
+    /// シナリオ・幅・描画方式のキーを受け付ける、プレビューにフォーカスのある状態
+    fn preview_app() -> App {
+        let mut app = new_app();
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Preview);
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::from(code));
+    }
 
     /// 画面の文字（左上から右下）を行ごとに返す。全角文字の 2 セル目（空）は飛ばす
     fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -211,10 +312,10 @@ mod tests {
 
     #[test]
     fn test_draw_shows_header_preview_parts_and_footer() {
-        let (screen, overlay) = render(&App::new(), 100, 24);
+        let (screen, overlay) = render(&new_app(), 100, 24);
         let text = screen.join("\n");
         for expected in [
-            "プレビュー（読み取り専用）",
+            "配置の編集（まだ保存できません）",
             "設定: （テスト）",
             "シナリオ: 通常",
             "描画: ratatui",
@@ -223,6 +324,8 @@ mod tests {
             "directory",
             "review",
             "（非表示）", // 通常のシナリオでは、レビューは表示されない
+            " 1: ",
+            "Shift+矢印: 移動", // 配置にフォーカスがある
             "q: 終了",
         ] {
             assert!(text.contains(expected), "{expected} がない\n{text}");
@@ -232,22 +335,22 @@ mod tests {
 
     #[test]
     fn test_draw_follows_scenario_and_width() {
-        let mut app = App::new();
-        app.handle_key(KeyCode::Right); // 長いパス・ブランチ
+        let mut app = preview_app();
+        press(&mut app, KeyCode::Right); // 長いパス・ブランチ
         let (screen, _) = render(&app, 100, 24);
         assert!(screen.join("\n").contains("シナリオ: 長いパス・ブランチ"));
 
         // 幅 160 は、実端末（100 列）より広い: その旨を表示する
-        app.handle_key(KeyCode::Char('w'));
-        app.handle_key(KeyCode::Char('w'));
-        app.handle_key(KeyCode::Char('w'));
+        press(&mut app, KeyCode::Char('w'));
+        press(&mut app, KeyCode::Char('w'));
+        press(&mut app, KeyCode::Char('w'));
         let (screen, _) = render(&app, 100, 24);
         let text = screen.join("\n");
         assert!(text.contains("幅: 160"), "{text}");
         assert!(text.contains("横を切り詰めて表示しています"), "{text}");
 
         // 実端末の幅（auto）では、その表示は出ない
-        app.handle_key(KeyCode::Char('w'));
+        press(&mut app, KeyCode::Char('w'));
         let (screen, _) = render(&app, 100, 24);
         let text = screen.join("\n");
         assert!(text.contains("幅: auto（98）"), "{text}");
@@ -256,8 +359,8 @@ mod tests {
 
     #[test]
     fn test_draw_raw_mode_returns_overlay_inside_the_border() {
-        let mut app = App::new();
-        app.handle_key(KeyCode::Char('r'));
+        let mut app = preview_app();
+        press(&mut app, KeyCode::Char('r'));
         let (screen, overlay) = render(&app, 100, 24);
         let overlay = overlay.expect("生 ANSI の出力がある");
         // ヘッダー 1 行、枠 1 行の次から、枠の内側の幅で出す
@@ -288,10 +391,10 @@ mod tests {
         ];
         for (width, height) in sizes {
             for steps in 0..8 {
-                let mut app = App::new();
-                app.handle_key(KeyCode::Char('r'));
+                let mut app = preview_app();
+                press(&mut app, KeyCode::Char('r'));
                 for _ in 0..steps {
-                    app.handle_key(KeyCode::Right);
+                    press(&mut app, KeyCode::Right);
                 }
                 let (_, overlay) = render(&app, width, height);
                 let overlay = overlay.expect("生 ANSI の出力がある");
@@ -359,12 +462,93 @@ mod tests {
         // 極端に小さい端末でも panic しない
         for (width, height) in [(1, 1), (10, 5), (20, 8), (40, 12)] {
             for scenario_steps in 0..8 {
-                let mut app = App::new();
+                let mut app = preview_app();
                 for _ in 0..scenario_steps {
-                    app.handle_key(KeyCode::Right);
+                    press(&mut app, KeyCode::Right);
                 }
                 let _ = render(&app, width, height);
             }
         }
+    }
+
+    #[test]
+    fn test_draw_layout_shows_tokens_and_hidden_notes() {
+        let config = Config::default();
+        let ctx = ViewContext {
+            config: &config,
+            source_label: "（テスト）",
+        };
+        let mut app = App::new(FormatLayout::parse(
+            "$directory | $review
+
+$review",
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &app, &ctx);
+            })
+            .unwrap();
+        let text = screen(&terminal).join(
+            "
+",
+        );
+        // 固定テキストは引用符で囲み、空白は `␣` にする
+        assert!(text.contains("directory \"␣|␣\" review"), "{text}");
+        assert!(text.contains("（空の行）"), "{text}");
+        // 出力されない行（レビューだけの行と、空の行）に、その旨を添える
+        assert_eq!(text.matches("この行は出力されません").count(), 2, "{text}");
+
+        // プレビューにフォーカスを移すと、配置の操作ではなく、プレビューの操作を案内する
+        press(&mut app, KeyCode::Tab);
+        terminal
+            .draw(|frame| {
+                draw(frame, &app, &ctx);
+            })
+            .unwrap();
+        let text = screen(&terminal).join(
+            "
+",
+        );
+        assert!(text.contains("w: 幅"), "{text}");
+        assert!(!text.contains("Shift+矢印"), "{text}");
+    }
+
+    #[test]
+    fn test_draw_preview_follows_the_edited_layout() {
+        let mut app = App::new(FormatLayout::parse("$model $quota"));
+        let (before, _) = render(&app, 100, 24);
+        assert!(
+            before[2..5]
+                .join(
+                    "
+"
+                )
+                .contains("Claude Opus")
+        );
+
+        // 選択中（先頭）の `$model` を消すと、プレビューにも反映される。設定自体は変わらない
+        press(&mut app, KeyCode::Char('d'));
+        let (after, _) = render(&app, 100, 24);
+        assert!(
+            !after[2..5]
+                .join(
+                    "
+"
+                )
+                .contains("Claude Opus"),
+            "{after:?}"
+        );
+
+        press(&mut app, KeyCode::Char('u'));
+        let (restored, _) = render(&app, 100, 24);
+        assert!(
+            restored[2..5]
+                .join(
+                    "
+"
+                )
+                .contains("Claude Opus")
+        );
     }
 }
