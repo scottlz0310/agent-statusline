@@ -2,7 +2,9 @@
 //!
 //! 元の TOML 文書（コメント・未知のキーを保つ）、そこから導いた設定、配置の編集状態、
 //! 検証の結果を持つ。配置とプロパティの変更は、時系列で 1 本の履歴に積み、`undo` で操作の逆順に戻す。
-//! プロパティの変更は、検証でエラーになる値を受け付けず、下書きを変えない。
+//! プロパティの変更は、**新しいエラーを増やす値**を受け付けず、下書きを変えない。
+//! 読み込んだ設定が意味的なエラー（閾値の大小、認識できないスタイル名など。`Config` としては読める）を
+//! 持っているときも、エラーのキーを 1 つずつ直せる。エラーが残る間は、下書きは保存に適さない（`has_errors`）。
 
 use std::fmt;
 
@@ -17,7 +19,7 @@ use crate::engine::config::Config;
 #[derive(Debug)]
 pub enum PropError {
     Update(UpdateError),
-    /// 検証でエラーになった。最初のエラーを持つ
+    /// 新しいエラーになった。最初の新しいエラーを持つ
     Rejected(Issue),
 }
 
@@ -89,8 +91,10 @@ impl Draft {
         }
     }
 
-    /// プロパティを 1 つ更新する。エラーになる値は受け付けず、下書きを変えない。警告は受け付ける。
-    /// 値が変わらないとき（既定値と同じでキーがない場合を含む）は、履歴に積まない
+    /// プロパティを 1 つ更新する。**新しいエラー**（変更前にエラーのなかったキーのエラー）になる値は
+    /// 受け付けず、下書きを変えない。変更前から残っているエラーは、変更の妨げにならない
+    /// （複数のエラーがあっても、1 つずつ直せる。エラーのキーを別の誤った値にする変更も受け付ける）。
+    /// 警告は受け付ける。値が変わらないとき（既定値と同じでキーがない場合を含む）は、履歴に積まない
     pub fn set_prop(&mut self, part: &str, key: &str, value: &PropValue) -> Result<(), PropError> {
         let mut candidate = self.document.clone();
         set_prop(&mut candidate, &self.defaults, part, key, value).map_err(PropError::Update)?;
@@ -101,15 +105,20 @@ impl Draft {
         }
 
         let report = validate(&text);
-        if let Some(issue) = report
-            .issues
+        let existing: Vec<&str> = self
+            .document_issues
             .iter()
-            .find(|issue| issue.severity == Severity::Error)
-        {
+            .filter(|issue| issue.severity == Severity::Error)
+            .map(|issue| issue.path.as_str())
+            .collect();
+        if let Some(issue) = report.issues.iter().find(|issue| {
+            issue.severity == Severity::Error && !existing.contains(&issue.path.as_str())
+        }) {
             return Err(PropError::Rejected(issue.clone()));
         }
+        // 設定として読めなくなる変更は、文書全体のエラー（対象のキーが空）で、既存のエラーにはならない
         let Some(config) = report.config else {
-            unreachable!("エラーがなければ、設定として読めている")
+            unreachable!("新しいエラーがなければ、設定として読めている")
         };
 
         self.history.push(Edit::Prop(previous));
@@ -141,6 +150,13 @@ impl Draft {
             });
         }
         issues
+    }
+
+    /// エラーが残っているか。残っている間は、保存に適さない
+    pub fn has_errors(&self) -> bool {
+        self.document_issues
+            .iter()
+            .any(|issue| issue.severity == Severity::Error)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -270,6 +286,76 @@ mod tests {
             assert!(!draft.can_undo(), "{name}: 履歴に積まない");
             assert_eq!(draft.config().format, Config::default().format, "{name}");
         }
+    }
+
+    #[test]
+    fn test_existing_errors_can_be_fixed_one_by_one() {
+        // どちらも `Config` としては読めるが、スタイル名が誤っている
+        let mut draft = draft(
+            "[model]
+style = \"cyna\"
+
+[git_branch]
+style = \"gren\"
+",
+        );
+        assert!(draft.has_errors());
+        let error_paths = |draft: &Draft| -> Vec<String> {
+            draft
+                .issues()
+                .into_iter()
+                .filter(|issue| issue.severity == Severity::Error)
+                .map(|issue| issue.path)
+                .collect()
+        };
+        assert_eq!(error_paths(&draft), ["model.style", "git_branch.style"]);
+
+        // 片方を直すと、もう片方のエラーが残っていても受け付ける
+        draft.set_prop("model", "style", &string("cyan")).unwrap();
+        assert_eq!(error_paths(&draft), ["git_branch.style"]);
+        assert!(draft.has_errors(), "エラーが残る間は、保存に適さない");
+
+        // 無関係なプロパティの変更も、既存のエラーに妨げられない
+        draft
+            .set_prop("git_branch", "symbol", &string("B"))
+            .unwrap();
+        // 直した箇所を、再び誤った値にする変更は、新しいエラーなので受け付けない
+        let before = draft.to_toml();
+        assert!(draft.set_prop("model", "style", &string("cyna")).is_err());
+        // エラーのないキーを、新たに誤った値にする変更も受け付けない
+        assert!(
+            draft
+                .set_prop("plan", "style", &string("nonexistent"))
+                .is_err()
+        );
+        assert_eq!(draft.to_toml(), before, "拒否した変更は、下書きを変えない");
+
+        // 残りも直すと、エラーがなくなる
+        draft
+            .set_prop("git_branch", "style", &string("green"))
+            .unwrap();
+        assert!(!draft.has_errors());
+        assert_eq!(error_paths(&draft), Vec::<String>::new());
+
+        // 元に戻すと、エラーも戻る
+        draft.undo();
+        assert_eq!(error_paths(&draft), ["git_branch.style"]);
+        draft.undo();
+        draft.undo();
+        assert_eq!(error_paths(&draft), ["model.style", "git_branch.style"]);
+    }
+
+    #[test]
+    fn test_erroneous_key_may_move_between_invalid_values() {
+        // すでにエラーのキーを、別の誤った値にしても、エラーのキーは増えない（受け付ける）
+        let mut draft = draft(
+            "[model]
+style = \"cyna\"
+",
+        );
+        draft.set_prop("model", "style", &string("cynaa")).unwrap();
+        assert!(draft.has_errors());
+        assert_eq!(draft.config().model.style, "cynaa");
     }
 
     #[test]
