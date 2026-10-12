@@ -7,6 +7,7 @@ mod model;
 mod modules;
 mod preview;
 mod sink;
+mod tui;
 mod updater;
 
 use std::io::{self, Read};
@@ -38,6 +39,7 @@ fn main() -> io::Result<()> {
             config,
             bench,
         } => cmd_render(agent, config.as_deref(), bench),
+        Commands::Config { config } => tui::run(config.as_deref()),
         Commands::Install {
             agent,
             all,

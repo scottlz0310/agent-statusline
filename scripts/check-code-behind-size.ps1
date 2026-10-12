@@ -23,10 +23,10 @@ $ErrorActionPreference = "Stop"
 # 値の更新は「抽出して減った」「意図して増やす」のいずれかを PR で説明できるときだけ行う。
 $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力。
-    # 301: 設定 TUI の `mod editor;`、302: `mod preview;` の追加（ロジックは追加していない）
-    "src/main.rs" = 302
-    # clap CLI 引数定義
-    "src/cli.rs"  = 114
+    # 301: 設定 TUI の `mod editor;`、302: `mod preview;`、304: `mod tui;` と `config` サブコマンドのディスパッチ 1 行（ロジックは tui/ に置く）
+    "src/main.rs" = 304
+    # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）
+    "src/cli.rs"  = 121
 }
 
 $violations = New-Object System.Collections.Generic.List[string]
