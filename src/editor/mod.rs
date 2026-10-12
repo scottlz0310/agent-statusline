@@ -3,7 +3,9 @@
 //! フェーズ 1 の TUI が呼ぶまで、非テストビルドでは未使用の項目がある。
 #![allow(dead_code)]
 
+pub mod history;
 pub mod layout;
 pub mod load;
+pub mod save;
 pub mod update;
 pub mod validate;

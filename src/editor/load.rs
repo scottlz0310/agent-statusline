@@ -39,7 +39,11 @@ pub enum ConfigSource {
         fingerprint: ContentHash,
     },
     /// まだ作られていない。保存先だけを持ち、履歴・ハッシュは持たない
-    Missing { target: PathBuf },
+    Missing {
+        target: PathBuf,
+        /// リンク切れのシンボリックリンクを辿って決めた保存先か。そうなら、先の親ディレクトリは作成しない
+        from_link: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -150,11 +154,11 @@ fn load_from_path(requested: &Path) -> Result<LoadedConfig, ConfigError> {
         Ok(bytes) => bytes,
         // リンク先のないシンボリックリンクも NotFound になる
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            let target = resolve_missing_target(requested).map_err(read_error)?;
+            let (target, from_link) = resolve_missing_target(requested).map_err(read_error)?;
             return Ok(LoadedConfig {
                 config: Config::default(),
                 document: DocumentMut::new(),
-                source: ConfigSource::Missing { target },
+                source: ConfigSource::Missing { target, from_link },
             });
         }
         Err(err) => return Err(read_error(err)),
@@ -191,13 +195,18 @@ fn load_from_path(requested: &Path) -> Result<LoadedConfig, ConfigError> {
 
 /// 存在しないファイルの保存先を決める。リンク切れのリンクは、リンク先のパスにする。
 /// 相対リンクは、リンクの親ディレクトリを基準にする。`canonicalize` は対象が存在しないと使えない
-fn resolve_missing_target(path: &Path) -> io::Result<PathBuf> {
+fn resolve_missing_target(path: &Path) -> io::Result<(PathBuf, bool)> {
     let mut current = path.to_path_buf();
+    let mut from_link = false;
     for _ in 0..MAX_LINK_DEPTH {
         match std::fs::read_link(&current) {
-            Ok(link) if link.is_absolute() => current = link,
+            Ok(link) if link.is_absolute() => {
+                current = link;
+                from_link = true;
+            }
             Ok(link) => {
                 current = current.parent().unwrap_or_else(|| Path::new("")).join(link);
+                from_link = true;
             }
             // リンクではない、または存在しない: current が保存先
             Err(err)
@@ -206,7 +215,7 @@ fn resolve_missing_target(path: &Path) -> io::Result<PathBuf> {
                     io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
                 ) =>
             {
-                return Ok(current);
+                return Ok((current, from_link));
             }
             Err(err) => return Err(err),
         }
@@ -281,7 +290,8 @@ mod tests {
         assert_eq!(
             loaded.source,
             ConfigSource::Missing {
-                target: standard.clone()
+                target: standard.clone(),
+                from_link: false
             }
         );
 
@@ -291,7 +301,8 @@ mod tests {
         assert_eq!(
             loaded.source,
             ConfigSource::Missing {
-                target: custom.clone()
+                target: custom.clone(),
+                from_link: false
             }
         );
         let with_env = ConfigEnv {
@@ -299,7 +310,13 @@ mod tests {
             ..env.clone()
         };
         let loaded = load_config_strict(None, &with_env).unwrap();
-        assert_eq!(loaded.source, ConfigSource::Missing { target: custom });
+        assert_eq!(
+            loaded.source,
+            ConfigSource::Missing {
+                target: custom,
+                from_link: false
+            }
+        );
 
         // 標準の場所に作られたら、それを読む
         std::fs::create_dir_all(standard.parent().unwrap()).unwrap();
@@ -325,7 +342,13 @@ mod tests {
 
         // 標準パスがリンク切れのときは、~/.config の別の設定ではなく、リンク先を保存先にする
         let loaded = load_config_strict(None, &env).unwrap();
-        assert_eq!(loaded.source, ConfigSource::Missing { target });
+        assert_eq!(
+            loaded.source,
+            ConfigSource::Missing {
+                target,
+                from_link: true
+            }
+        );
         assert_eq!(loaded.config.format, Config::default().format);
 
         // 標準パスが存在しないときは、従来どおり ~/.config を読む
@@ -406,7 +429,13 @@ mod tests {
             return;
         }
         let loaded = load_config_strict(Some(&link), &ConfigEnv::default()).unwrap();
-        assert_eq!(loaded.source, ConfigSource::Missing { target });
+        assert_eq!(
+            loaded.source,
+            ConfigSource::Missing {
+                target,
+                from_link: true
+            }
+        );
     }
 
     #[test]
@@ -421,7 +450,8 @@ mod tests {
         {
             return;
         }
-        let target = resolve_missing_target(&first).unwrap();
+        let (target, from_link) = resolve_missing_target(&first).unwrap();
+        assert!(from_link);
         assert_eq!(
             std::fs::canonicalize(target.parent().unwrap()).unwrap(),
             std::fs::canonicalize(dir.path()).unwrap()
