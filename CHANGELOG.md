@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - 設定を対話的に編集・プレビューする TUI（`agent-statusline config`）の基本設計書 `docs/agent-statusline-config-tui-design.md` を追加。実装は含まない。
 
+### Changed
+- 描画を、副作用のある「収集」（Git の読み取り、サマリ JSON の読み込み）と、収集済みの入力だけから合成する純関数 `compose` に分離した。`render` の出力は変わらない。設定 TUI のプレビューが Git やサマリに触れずに描画できるようにするための前提整備（設定 TUI フェーズ 0-1）。
+
+### Fixed
+- `format` の置換を 1 パスにした。これまでは逐次置換だったため、ブランチ名・モデル名などの値に `$model` のような変数名が含まれると、後続の置換で再展開されていた。値はそのまま表示される。`$` に続く文字列は、その文脈で既知の変数名のうち最長一致として読み、直後の文字列は固定テキストとして保つ（既定の `$symbolCtx` は従来どおり `🧠 Ctx` と表示される）。
+
 ## [0.3.1] - 2026-09-29
 
 ### Changed
