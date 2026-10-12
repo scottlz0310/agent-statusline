@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 設定を対話的に編集・プレビューする TUI（`agent-statusline config`）の基本設計書 `docs/agent-statusline-config-tui-design.md` を追加。実装は含まない。
 - `[directory] symbol`（既定 `"📁 "`）を追加。既定の `directory.format` は `$symbol[$folder]($folder_style) …` になったが、既定の出力は変わらない。絵文字を `format` に直書きしている既存の設定も、そのまま動く。
 - 設定の編集サービス `editor` の土台を追加（設定 TUI フェーズ 0-3a）。設定ファイルの厳密な読み込み（構文エラーは既定値で置き換えず、元の内容とエラー位置を返す。未作成のファイルやリンク切れは保存先つきで扱う）と、トップレベル `format` を行と部品に分解して損失なく戻せる配置モデルを含む。まだ `config` サブコマンドからは呼ばれない。
+- 設定の編集サービス `editor` に、TOML の部分更新（`set_prop` / `set_format`。変更したキーだけを書き込み、コメント・並び・未知のキー・`format` の書き方を保つ。既定値と同じ値はキーがなければ書かない）と、保存前の検証（`validate`。構文・型・閾値の範囲・スタイル名はエラー、未認識のキーや `format` の未知の変数・括弧の不整合は警告）を追加（設定 TUI フェーズ 0-3b）。まだ `config` サブコマンドからは呼ばれない。
 
 ### Changed
 - 部品（`directory`、`git_branch` など 10 個）の ID・設定キー・`format` で使える変数・描画関数を、部品レジストリ `engine/parts.rs` に集約した。描画の分岐はレジストリ起点になり、既定の設定との整合を検査するテストを追加した。出力は変わらない（設定 TUI フェーズ 0-2）。

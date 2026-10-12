@@ -58,6 +58,31 @@ pub fn expand(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
+/// テキストに残っている `$名前`（識別子として読める範囲）を、重複なしで `found` に追加する
+pub fn collect_dollar_names(text: &str, found: &mut Vec<String>) {
+    for segment in text.split('$').skip(1) {
+        let name: String = segment
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && !found.contains(&name)
+        {
+            found.push(name);
+        }
+    }
+}
+
+/// `names` に含まれない `$名前`。展開では置換されず、そのまま出力される
+pub fn unknown_variables(template: &str, names: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    for token in tokenize(template, names) {
+        if let Token::Text(text) = token {
+            collect_dollar_names(text, &mut found);
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

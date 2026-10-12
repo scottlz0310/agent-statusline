@@ -4,7 +4,7 @@
 //! 認識できない `$xxx` は固定テキストとして保持し、描画と同じく置換されない。
 
 use crate::engine::parts::part_ids;
-use crate::engine::template::{Token as LexToken, tokenize};
+use crate::engine::template::{Token as LexToken, collect_dollar_names, tokenize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
@@ -59,17 +59,7 @@ impl Layout {
             let Token::Literal(text) = token else {
                 continue;
             };
-            for segment in text.split('$').skip(1) {
-                let name: String = segment
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                    && !found.contains(&name)
-                {
-                    found.push(name);
-                }
-            }
+            collect_dollar_names(text, &mut found);
         }
         found
     }
