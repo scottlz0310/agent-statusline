@@ -59,6 +59,11 @@ impl LayoutEditor {
         }
     }
 
+    /// 元に戻せる変更の数。操作の前後で比べると、履歴に積まれたかが分かる
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

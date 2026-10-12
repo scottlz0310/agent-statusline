@@ -171,6 +171,8 @@ Token  = Part(id) | Literal(String)
 - 保存前に、(1) 再解析できること、(2) `Config` として読めること、(3) 閾値の範囲（`threshold_warning < threshold_critical` など）、(4) スタイル名が `parse_style_tokens` で認識できること、を検証する。
 - スタイル指定（`parse_style_tokens`）は、現在 16 色の名前と `bold`・`dimmed`・`italic`・`underline`・`inverted` に限られる。256 色や RGB への拡張は、エンジンの変更を伴うので、本設計の範囲外とする。
 
+**編集中の状態（`editor/draft.rs`）**：TUI は、設定の `Draft`（元の `DocumentMut`、そこから導いた `Config`、配置の `LayoutEditor`、検証の結果）を操作する。プロパティの変更は、候補の文書を作って `validate` にかけ、エラーがなければ採用する（エラーの値は受け付けず、下書きを変えない。警告は受け付けて表示する）。配置とプロパティの変更は、時系列で 1 本の履歴に積み、`undo` で操作の逆順に戻す（§6.3）。保存用の TOML は、配置が `format` と異なるときだけ `set_format` で書き込む。
+
 ### 5.4 保存・外部変更・履歴
 
 設定ファイルは、クラウドドライブ上の実ファイルへのシンボリックリンクであることがある。TUI は、リンクの作成や診断を行わないが、その構成を壊さずに保存できなければならない。

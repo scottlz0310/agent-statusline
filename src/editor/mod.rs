@@ -3,6 +3,7 @@
 //! フェーズ 1 の TUI が呼ぶまで、非テストビルドでは未使用の項目がある。
 #![allow(dead_code)]
 
+pub mod draft;
 pub mod history;
 pub mod layout;
 pub mod layout_edit;

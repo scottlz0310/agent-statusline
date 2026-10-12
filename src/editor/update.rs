@@ -17,7 +17,7 @@ pub enum PropValue {
 }
 
 impl PropValue {
-    fn from_item(item: &Item) -> Option<Self> {
+    pub fn from_item(item: &Item) -> Option<Self> {
         let value = item.as_value()?;
         match value {
             Value::String(s) => Some(Self::Str(s.value().clone())),
@@ -95,6 +95,7 @@ impl fmt::Display for UpdateError {
 impl std::error::Error for UpdateError {}
 
 /// `Config::default()` の値。既定値と同じ値に戻すときの扱い（キーを書かない）の判定に使う
+#[derive(Debug)]
 pub struct DefaultValues(DocumentMut);
 
 impl DefaultValues {
@@ -104,7 +105,7 @@ impl DefaultValues {
         Self(text.parse().expect("直列化した TOML は解析できる"))
     }
 
-    fn get(&self, part: &str, key: &str) -> Option<PropValue> {
+    pub fn get(&self, part: &str, key: &str) -> Option<PropValue> {
         let table = self.0.get(part)?.as_table_like()?;
         PropValue::from_item(table.get(key)?)
     }
