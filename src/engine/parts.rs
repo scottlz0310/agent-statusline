@@ -9,6 +9,7 @@ use crate::engine::formatter::{
 };
 use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
 use crate::model::state::StatuslineState;
+use crate::modules::directory::TruncationMode;
 use crate::modules::git::GitStatus;
 
 /// 部品の描画に渡す、収集済みの入力
@@ -27,6 +28,8 @@ pub enum PropKind {
     Text,
     Separator,
     Bool,
+    /// 決められた値のどれか（例: "left"、"middle"）
+    Choice(&'static [&'static str]),
     /// 0..=100 の整数
     Threshold,
     /// `format` 文字列。`$変数` で使える変数名を持つ
@@ -64,7 +67,10 @@ pub static PARTS: [PartSpec; 10] = [
             prop("symbol", PropKind::Symbol),
             prop("folder_style", PropKind::Style),
             prop("path_style", PropKind::Style),
-            prop("truncation_mode", PropKind::Text),
+            prop(
+                "truncation_mode",
+                PropKind::Choice(&TruncationMode::CHOICES),
+            ),
             DISABLED,
         ],
         render: |c, i| render_directory(&c.directory, i.state, i.terminal_width),
@@ -273,6 +279,20 @@ mod tests {
                     _ => item.is_str(),
                 };
                 assert!(ok, "{}.{} の型: {item:?}", part.id, p.key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_choice_values_are_valid_choices() {
+        let doc = default_document();
+        for part in &PARTS {
+            for p in part.props {
+                let PropKind::Choice(choices) = p.kind else {
+                    continue;
+                };
+                let value = doc[part.id][p.key].as_str().unwrap();
+                assert!(choices.contains(&value), "{}.{}: {value}", part.id, p.key);
             }
         }
     }

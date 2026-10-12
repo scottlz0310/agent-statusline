@@ -197,6 +197,13 @@ fn check_part_table(id: &str, props: &[PropSpec], table: &dyn TableLike, issues:
                     issues.push(error(&path, message));
                 }
             }
+            PropKind::Choice(choices) if !choices.contains(&value) => {
+                let message = format!(
+                    "{} のいずれかを指定してください: {value}",
+                    choices.join(" / ")
+                );
+                issues.push(error(&path, message));
+            }
             PropKind::Format(placeholders) => {
                 for name in unknown_variables(value, placeholders) {
                     let message = format!("未知の変数 ${name} はそのまま出力されます");
@@ -318,6 +325,12 @@ mod tests {
                 "[model]\nstyle = \"bold cyna\"\n",
                 "model.style",
                 "cyna",
+            ),
+            (
+                "invalid-choice",
+                "[directory]\ntruncation_mode = \"right\"\n",
+                "directory.truncation_mode",
+                "left / middle",
             ),
             (
                 "unknown-style-in-set",

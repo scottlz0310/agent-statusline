@@ -53,6 +53,12 @@ pub enum UpdateError {
         key: String,
         value: i64,
     },
+    InvalidChoice {
+        part: String,
+        key: String,
+        value: String,
+        choices: &'static [&'static str],
+    },
     NotATable(String),
 }
 
@@ -71,6 +77,16 @@ impl fmt::Display for UpdateError {
             Self::OutOfRange { part, key, value } => {
                 write!(f, "{part}.{key} は 0〜100 の整数が必要です: {value}")
             }
+            Self::InvalidChoice {
+                part,
+                key,
+                value,
+                choices,
+            } => write!(
+                f,
+                "{part}.{key} は {} のいずれかが必要です: {value}",
+                choices.join(" / ")
+            ),
             Self::NotATable(part) => write!(f, "[{part}] がテーブルではありません"),
         }
     }
@@ -160,6 +176,14 @@ fn check_value(part: &str, key: &str, value: &PropValue) -> Result<(), UpdateErr
             value: *v,
         }),
         (PropKind::Threshold, _) => Err(mismatch("整数")),
+        (PropKind::Choice(choices), PropValue::Str(v)) if !choices.contains(&v.as_str()) => {
+            Err(UpdateError::InvalidChoice {
+                part: part.to_string(),
+                key: key.to_string(),
+                value: v.clone(),
+                choices,
+            })
+        }
         (_, PropValue::Str(_)) => Ok(()),
         (_, _) => Err(mismatch("文字列")),
     }
@@ -423,6 +447,31 @@ mod tests {
     }
 
     #[test]
+    fn test_set_prop_choice() {
+        let defaults = DefaultValues::new();
+        // (名前, 値, 期待する内容)。既定値（middle）以外は追加し、既定値なら書かない
+        let cases = [
+            (
+                "non-default",
+                "left",
+                "[directory]\ntruncation_mode = \"left\"\n",
+            ),
+            ("default", "middle", ""),
+        ];
+        for (name, value, expected) in cases {
+            let mut doc = parse("");
+            set_prop(
+                &mut doc,
+                &defaults,
+                "directory",
+                "truncation_mode",
+                &s(value),
+            )
+            .unwrap();
+            assert_eq!(doc.to_string(), expected, "{name}");
+        }
+    }
+    #[test]
     fn test_set_prop_errors() {
         let defaults = DefaultValues::new();
         let cases = [
@@ -491,6 +540,19 @@ mod tests {
                     part: "context".into(),
                     key: "threshold_warning".into(),
                     value: 101,
+                },
+            ),
+            (
+                "invalid-choice",
+                "",
+                "directory",
+                "truncation_mode",
+                s("right"),
+                UpdateError::InvalidChoice {
+                    part: "directory".into(),
+                    key: "truncation_mode".into(),
+                    value: "right".into(),
+                    choices: &["left", "middle"],
                 },
             ),
             (

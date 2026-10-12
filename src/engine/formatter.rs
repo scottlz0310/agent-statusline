@@ -8,7 +8,7 @@ use crate::engine::template::{Token, expand, tokenize};
 use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
 use crate::model::state::StatuslineState;
 use crate::modules::context::format_tokens;
-use crate::modules::directory::format_path;
+use crate::modules::directory::{TruncationMode, format_path};
 use crate::modules::git::{GitQuery, GitStatus, get_git_status};
 use crate::modules::quota::format_reset_seconds;
 use crate::modules::review::{default_summary_path, load_summary, reviews_for_repo};
@@ -27,7 +27,9 @@ pub fn render_directory(
         .file_name()
         .map_or_else(|| ".".to_string(), |f| f.to_string_lossy().to_string());
     let path_max = (terminal_width / 2).max(40);
-    let short_path = format_path(&state.cwd, path_max);
+    // 認識できない値でも描画は止めない（保存時の検証が、誤りを知らせる）
+    let mode = TruncationMode::parse(&cfg.truncation_mode).unwrap_or(TruncationMode::Middle);
+    let short_path = format_path(&state.cwd, path_max, mode);
 
     expand(
         &cfg.format,
@@ -722,6 +724,38 @@ mod tests {
             80,
         );
         assert_eq!(strip_ansi(&rendered), "$model:$model 🤖 Claude Opus");
+    }
+
+    #[test]
+    fn test_render_directory_truncation_mode() {
+        let state = StatuslineState {
+            cwd: PathBuf::from(
+                "/home/dev/src/very/deeply/nested/workspace/directory/for/the/project",
+            ),
+            ..Default::default()
+        };
+        let cfg_with = |mode: &str| DirectoryConfig {
+            format: "$path".to_string(),
+            truncation_mode: mode.to_string(),
+            ..Default::default()
+        };
+        // 幅 80 での省略後の最大幅は 40
+        let cases = [
+            ("left", ".../workspace/directory/for/the/project"),
+            ("middle", "/home/dev/src/very/.../y/for/the/project"),
+            // 認識できない値でも描画は止まらず、既定（middle）と同じになる
+            ("right", "/home/dev/src/very/.../y/for/the/project"),
+            ("", "/home/dev/src/very/.../y/for/the/project"),
+        ];
+        for (mode, expected) in cases {
+            let rendered = render_directory(&cfg_with(mode), &state, 80);
+            assert_eq!(
+                rendered.chars().count().min(40),
+                rendered.chars().count(),
+                "{mode}"
+            );
+            assert_eq!(rendered, expected, "{mode:?}");
+        }
     }
 
     #[test]

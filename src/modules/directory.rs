@@ -1,20 +1,56 @@
 use std::path::Path;
 
-/// パスをターミナル幅に合わせて中間省略する (/foo/.../bar)
-pub fn format_path(path: &Path, max_len: usize) -> String {
+/// パスを省略する位置
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncationMode {
+    /// 先頭側を省略する (`.../foo/bar`)
+    Left,
+    /// 中間を省略する (`/foo/.../bar`)
+    Middle,
+}
+
+impl TruncationMode {
+    /// 設定 `[directory] truncation_mode` で指定できる値
+    pub const CHOICES: [&'static str; 2] = ["left", "middle"];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "left" => Some(Self::Left),
+            "middle" => Some(Self::Middle),
+            _ => None,
+        }
+    }
+}
+
+/// パスをターミナル幅に合わせて省略する。`max_len` 以下に収まらない短い幅（10 未満）では省略しない
+pub fn format_path(path: &Path, max_len: usize, mode: TruncationMode) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     let char_count = s.chars().count();
-    if max_len >= 10 && char_count > max_len {
-        let head_len = (max_len / 2).saturating_sub(2);
-        let tail_len = max_len.saturating_sub(head_len).saturating_sub(5);
-        let head: String = s.chars().take(head_len).collect();
-        let tail: String = s
-            .chars()
-            .skip(char_count.saturating_sub(tail_len))
-            .collect();
-        format!("{head}/.../{tail}")
-    } else {
-        s
+    if max_len < 10 || char_count <= max_len {
+        return s;
+    }
+
+    match mode {
+        TruncationMode::Middle => {
+            let head_len = (max_len / 2).saturating_sub(2);
+            let tail_len = max_len.saturating_sub(head_len).saturating_sub(5);
+            let head: String = s.chars().take(head_len).collect();
+            let tail: String = s
+                .chars()
+                .skip(char_count.saturating_sub(tail_len))
+                .collect();
+            format!("{head}/.../{tail}")
+        }
+        TruncationMode::Left => {
+            let tail_len = max_len.saturating_sub(3);
+            let tail: String = s
+                .chars()
+                .skip(char_count.saturating_sub(tail_len))
+                .collect();
+            // 末尾側の最初の区切りから残し、途中で切れた名前を ...// のように見せない
+            tail.find('/')
+                .map_or_else(|| format!("...{tail}"), |i| format!("...{}", &tail[i..]))
+        }
     }
 }
 
@@ -22,26 +58,58 @@ pub fn format_path(path: &Path, max_len: usize) -> String {
 mod tests {
     use super::*;
 
+    const LONG: &str = "C:/Users/jojob/src/very/long/nested/directory/structure/project";
+
     #[test]
     fn test_format_path_short() {
-        let path = Path::new("C:/Users/jojob/src");
-        let formatted = format_path(path, 40);
-        assert_eq!(formatted, "C:/Users/jojob/src");
+        for mode in [TruncationMode::Left, TruncationMode::Middle] {
+            let formatted = format_path(Path::new("C:/Users/jojob/src"), 40, mode);
+            assert_eq!(formatted, "C:/Users/jojob/src", "{mode:?}");
+        }
     }
 
     #[test]
     fn test_format_path_long_truncated() {
-        let path = Path::new("C:/Users/jojob/src/very/long/nested/directory/structure/project");
-        let formatted = format_path(path, 25);
-        assert!(formatted.contains("/.../"));
-        assert!(formatted.chars().count() <= 25);
+        // (モード, 最大幅, 期待する結果)
+        let cases = [
+            (TruncationMode::Middle, 25, "C:/Users/j/.../re/project"),
+            (TruncationMode::Left, 25, ".../structure/project"),
+            (TruncationMode::Left, 10, "...project"),
+            (TruncationMode::Middle, 10, "C://.../ct"),
+        ];
+        for (mode, max_len, expected) in cases {
+            let formatted = format_path(Path::new(LONG), max_len, mode);
+            assert!(
+                formatted.chars().count() <= max_len,
+                "{mode:?}/{max_len}: {formatted}"
+            );
+            assert_eq!(formatted, expected, "{mode:?}/{max_len}");
+        }
     }
 
     #[test]
     fn test_format_path_tiny_max_len() {
-        let path = Path::new("C:/Users/jojob/src");
         // max_len が極端に小さい場合も panic せずそのまま返す
-        let formatted = format_path(path, 5);
-        assert_eq!(formatted, "C:/Users/jojob/src");
+        for mode in [TruncationMode::Left, TruncationMode::Middle] {
+            let formatted = format_path(Path::new("C:/Users/jojob/src"), 5, mode);
+            assert_eq!(formatted, "C:/Users/jojob/src", "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn test_truncation_mode_parse() {
+        let cases = [
+            ("left", Some(TruncationMode::Left)),
+            ("middle", Some(TruncationMode::Middle)),
+            ("Left", None),
+            ("right", None),
+            ("", None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(TruncationMode::parse(value), expected, "{value:?}");
+        }
+        for choice in TruncationMode::CHOICES {
+            assert!(TruncationMode::parse(choice).is_some(), "{choice}");
+        }
     }
 }
