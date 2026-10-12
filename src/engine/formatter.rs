@@ -3,14 +3,29 @@ use crate::engine::config::{
     ModelConfig, PlanConfig, QuotaConfig, ReviewConfig, SandboxConfig, SquirrelNotifierConfig,
 };
 use crate::engine::style::{pct_style_name, render_styled_text};
-use crate::model::review_summary::{ActiveReview, QueuedReview};
+use crate::engine::template::{Token, expand, tokenize};
+use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
 use crate::model::state::StatuslineState;
 use crate::modules::context::format_tokens;
 use crate::modules::directory::format_path;
-use crate::modules::git::{GitQuery, get_git_status};
+use crate::modules::git::{GitQuery, GitStatus, get_git_status};
 use crate::modules::quota::format_reset_seconds;
 use crate::modules::review::{default_summary_path, load_summary, reviews_for_repo};
 use crate::sink::notifier::expand_env_path;
+
+/// トップレベルの `format` で使える部品 ID
+pub const PART_IDS: [&str; 10] = [
+    "directory",
+    "git_branch",
+    "git_status",
+    "sandbox",
+    "model",
+    "context",
+    "agent_state",
+    "plan",
+    "quota",
+    "review",
+];
 
 pub fn render_directory(
     cfg: &DirectoryConfig,
@@ -27,17 +42,18 @@ pub fn render_directory(
     let path_max = (terminal_width / 2).max(40);
     let short_path = format_path(&state.cwd, path_max);
 
-    cfg.format
-        .replace("$folder_style", &cfg.folder_style)
-        .replace("$folder", &folder)
-        .replace("$path_style", &cfg.path_style)
-        .replace("$path", &short_path)
+    expand(
+        &cfg.format,
+        &[
+            ("folder_style", &cfg.folder_style),
+            ("folder", &folder),
+            ("path_style", &cfg.path_style),
+            ("path", &short_path),
+        ],
+    )
 }
 
-pub fn render_git_branch(
-    cfg: &GitBranchConfig,
-    git: Option<&crate::modules::git::GitStatus>,
-) -> String {
+pub fn render_git_branch(cfg: &GitBranchConfig, git: Option<&GitStatus>) -> String {
     if cfg.disabled {
         return String::new();
     }
@@ -48,16 +64,17 @@ pub fn render_git_branch(
         return String::new();
     };
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$branch", branch)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[
+            ("symbol", &cfg.symbol),
+            ("branch", branch),
+            ("style", &cfg.style),
+        ],
+    )
 }
 
-pub fn render_git_status(
-    cfg: &GitStatusConfig,
-    git: Option<&crate::modules::git::GitStatus>,
-) -> String {
+pub fn render_git_status(cfg: &GitStatusConfig, git: Option<&GitStatus>) -> String {
     if cfg.disabled {
         return String::new();
     }
@@ -68,9 +85,10 @@ pub fn render_git_status(
         return String::new();
     }
 
-    cfg.format
-        .replace("$status", &cfg.modified)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[("status", &cfg.modified), ("style", &cfg.style)],
+    )
 }
 
 pub fn render_sandbox(cfg: &SandboxConfig, state: &StatuslineState) -> String {
@@ -78,9 +96,10 @@ pub fn render_sandbox(cfg: &SandboxConfig, state: &StatuslineState) -> String {
         return String::new();
     }
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[("symbol", &cfg.symbol), ("style", &cfg.style)],
+    )
 }
 
 pub fn render_model(cfg: &ModelConfig, state: &StatuslineState) -> String {
@@ -91,10 +110,14 @@ pub fn render_model(cfg: &ModelConfig, state: &StatuslineState) -> String {
         return String::new();
     };
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$model", model)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[
+            ("symbol", &cfg.symbol),
+            ("model", model),
+            ("style", &cfg.style),
+        ],
+    )
 }
 
 pub fn render_context(cfg: &ContextConfig, state: &StatuslineState) -> String {
@@ -118,12 +141,16 @@ pub fn render_context(cfg: &ContextConfig, state: &StatuslineState) -> String {
         cfg.threshold_critical,
     );
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$percentage", &format!("{ctx}%"))
-        .replace("$pct_style", pct_style)
-        .replace("$tokens", &tokens)
-        .replace("$tok_style", &cfg.tok_style)
+    expand(
+        &cfg.format,
+        &[
+            ("symbol", &cfg.symbol),
+            ("percentage", &format!("{ctx}%")),
+            ("pct_style", pct_style),
+            ("tokens", &tokens),
+            ("tok_style", &cfg.tok_style),
+        ],
+    )
 }
 
 pub fn render_agent_state(cfg: &AgentStateConfig, state: &StatuslineState) -> String {
@@ -137,10 +164,14 @@ pub fn render_agent_state(cfg: &AgentStateConfig, state: &StatuslineState) -> St
         return String::new();
     }
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$state", agent_state)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[
+            ("symbol", &cfg.symbol),
+            ("state", agent_state),
+            ("style", &cfg.style),
+        ],
+    )
 }
 
 pub fn render_plan(cfg: &PlanConfig, state: &StatuslineState) -> String {
@@ -151,9 +182,7 @@ pub fn render_plan(cfg: &PlanConfig, state: &StatuslineState) -> String {
         return String::new();
     };
 
-    cfg.format
-        .replace("$tier", plan_tier)
-        .replace("$style", &cfg.style)
+    expand(&cfg.format, &[("tier", plan_tier), ("style", &cfg.style)])
 }
 
 pub fn render_quota(cfg: &QuotaConfig, state: &StatuslineState) -> String {
@@ -176,24 +205,27 @@ pub fn render_quota(cfg: &QuotaConfig, state: &StatuslineState) -> String {
             cfg.threshold_critical,
         );
 
-        let mut item = cfg
-            .format
-            .replace("$symbol", &cfg.symbol)
-            .replace("$label", &q.label)
-            .replace("$percentage", &format!("{pct}%"))
-            .replace("$style", style);
+        // リセット時刻が不明なときは、`(rst $reset_time)` の括りごと取り除く
+        let (format, reset_time) = match q.reset_in_seconds {
+            Some(reset_sec) => (cfg.format.clone(), format_reset_seconds(reset_sec)),
+            None => (
+                cfg.format
+                    .replace(" (rst $reset_time)", "")
+                    .replace("(rst $reset_time)", ""),
+                String::new(),
+            ),
+        };
 
-        if let Some(reset_sec) = q.reset_in_seconds {
-            let rst = format_reset_seconds(reset_sec);
-            item = item.replace("$reset_time", &rst);
-        } else {
-            item = item
-                .replace(" (rst $reset_time)", "")
-                .replace("(rst $reset_time)", "")
-                .replace("$reset_time", "");
-        }
-
-        items.push(item);
+        items.push(expand(
+            &format,
+            &[
+                ("symbol", &cfg.symbol),
+                ("label", &q.label),
+                ("percentage", &format!("{pct}%")),
+                ("style", style),
+                ("reset_time", &reset_time),
+            ],
+        ));
     }
 
     if items.is_empty() {
@@ -215,146 +247,103 @@ pub fn render_review(
     let items = active
         .iter()
         .map(|r| {
-            cfg.active_format
-                .replace("$pr", &r.pr_number.to_string())
-                .replace("$round", &r.round.to_string())
-                .replace("$agent", r.agent.as_deref().unwrap_or(""))
+            expand(
+                &cfg.active_format,
+                &[
+                    ("pr", &r.pr_number.to_string()),
+                    ("round", &r.round.to_string()),
+                    ("agent", r.agent.as_deref().unwrap_or("")),
+                ],
+            )
         })
         .chain(waiting.iter().map(|r| {
-            cfg.waiting_format
-                .replace("$pr", &r.pr_number.to_string())
-                .replace("$round", &r.round.to_string())
-                .replace("$reason", &r.reason)
+            expand(
+                &cfg.waiting_format,
+                &[
+                    ("pr", &r.pr_number.to_string()),
+                    ("round", &r.round.to_string()),
+                    ("reason", &r.reason),
+                ],
+            )
         }))
         .collect::<Vec<_>>()
         .join(&cfg.separator);
 
-    cfg.format
-        .replace("$symbol", &cfg.symbol)
-        .replace("$items", &items)
-        .replace("$style", &cfg.style)
+    expand(
+        &cfg.format,
+        &[
+            ("symbol", &cfg.symbol),
+            ("items", &items),
+            ("style", &cfg.style),
+        ],
+    )
 }
 
-/// Squirrel Notifier のサマリからカレントリポジトリ分のレビュー状態を描画する
-fn render_review_for_repo(
-    cfg: &ReviewConfig,
-    integration: &SquirrelNotifierConfig,
-    repo: Option<&str>,
+/// `format` が参照している部品 ID（既知の部品 ID の最長一致）
+fn used_parts(format: &str) -> Vec<&str> {
+    tokenize(format, &PART_IDS)
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Var(id) => Some(id),
+            Token::Text(_) => None,
+        })
+        .collect()
+}
+
+/// 部品 ID に対応する部品を描画する。ID は `PART_IDS` のいずれかであること
+fn render_part(
+    id: &str,
+    config: &Config,
+    state: &StatuslineState,
+    git: Option<&GitStatus>,
+    reviews: &RepoReviews,
+    terminal_width: usize,
 ) -> String {
-    let Some(repo) = repo else {
-        return String::new();
-    };
-    let path = integration
-        .summary_path
-        .as_deref()
-        .map(expand_env_path)
-        .or_else(default_summary_path);
-    let Some(summary) = path.as_deref().and_then(load_summary) else {
-        return String::new();
-    };
-    let (active, waiting) = reviews_for_repo(&summary, repo);
-    render_review(cfg, &active, &waiting)
+    match id {
+        "directory" => render_directory(&config.directory, state, terminal_width),
+        "git_branch" => render_git_branch(&config.git_branch, git),
+        "git_status" => render_git_status(&config.git_status, git),
+        "sandbox" => render_sandbox(&config.sandbox, state),
+        "model" => render_model(&config.model, state),
+        "context" => render_context(&config.context, state),
+        "agent_state" => render_agent_state(&config.agent_state, state),
+        "plan" => render_plan(&config.plan, state),
+        "quota" => render_quota(&config.quota, state),
+        "review" if config.integrations.squirrel_notifier.enabled => {
+            let active: Vec<&ActiveReview> = reviews.active.iter().collect();
+            let waiting: Vec<&QueuedReview> = reviews.waiting.iter().collect();
+            render_review(&config.review, &active, &waiting)
+        }
+        _ => String::new(),
+    }
 }
 
-/// 設定テンプレートに従ってステータスラインを描画する
-pub fn render_template(config: &Config, state: &StatuslineState, terminal_width: usize) -> String {
-    let dir_str = if config.format.contains("$directory") {
-        render_directory(&config.directory, state, terminal_width)
-    } else {
-        String::new()
-    };
-
-    let needs_branch = config.format.contains("$git_branch") && !config.git_branch.disabled;
-    let needs_dirty = config.format.contains("$git_status") && !config.git_status.disabled;
-    let needs_review = config.format.contains("$review")
-        && !config.review.disabled
-        && config.integrations.squirrel_notifier.enabled;
-
-    let git_status = if needs_branch || needs_dirty || needs_review {
-        Some(get_git_status(
-            &state.cwd,
-            GitQuery {
-                dirty: needs_dirty,
-                remote_repo: needs_review,
-            },
-        ))
-    } else {
-        None
-    };
-
-    let branch_str = if config.format.contains("$git_branch") {
-        render_git_branch(&config.git_branch, git_status.as_ref())
-    } else {
-        String::new()
-    };
-
-    let git_status_str = if config.format.contains("$git_status") {
-        render_git_status(&config.git_status, git_status.as_ref())
-    } else {
-        String::new()
-    };
-
-    let sandbox_str = if config.format.contains("$sandbox") {
-        render_sandbox(&config.sandbox, state)
-    } else {
-        String::new()
-    };
-
-    let model_str = if config.format.contains("$model") {
-        render_model(&config.model, state)
-    } else {
-        String::new()
-    };
-
-    let context_str = if config.format.contains("$context") {
-        render_context(&config.context, state)
-    } else {
-        String::new()
-    };
-
-    let agent_state_str = if config.format.contains("$agent_state") {
-        render_agent_state(&config.agent_state, state)
-    } else {
-        String::new()
-    };
-
-    let plan_str = if config.format.contains("$plan") {
-        render_plan(&config.plan, state)
-    } else {
-        String::new()
-    };
-
-    let quota_str = if config.format.contains("$quota") {
-        render_quota(&config.quota, state)
-    } else {
-        String::new()
-    };
-
-    let review_str = if needs_review {
-        render_review_for_repo(
-            &config.review,
-            &config.integrations.squirrel_notifier,
-            git_status.as_ref().and_then(|g| g.remote_repo.as_deref()),
-        )
-    } else {
-        String::new()
-    };
+/// 収集済みの入力だけからステータスラインを合成する純関数。Git・ファイル・環境変数には触れない
+pub fn compose(
+    config: &Config,
+    state: &StatuslineState,
+    git: Option<&GitStatus>,
+    reviews: &RepoReviews,
+    terminal_width: usize,
+) -> String {
+    let rendered: Vec<(&str, String)> = used_parts(&config.format)
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                render_part(id, config, state, git, reviews, terminal_width),
+            )
+        })
+        .collect();
+    let vars: Vec<(&str, &str)> = rendered
+        .iter()
+        .map(|(id, value)| (*id, value.as_str()))
+        .collect();
 
     let mut output_lines = Vec::new();
 
     for line in config.format.lines() {
-        let filled = line
-            .replace("$directory", &dir_str)
-            .replace("$git_branch", &branch_str)
-            .replace("$git_status", &git_status_str)
-            .replace("$sandbox", &sandbox_str)
-            .replace("$model", &model_str)
-            .replace("$context", &context_str)
-            .replace("$agent_state", &agent_state_str)
-            .replace("$plan", &plan_str)
-            .replace("$quota", &quota_str)
-            .replace("$review", &review_str);
-
+        let filled = expand(line, &vars);
         let trimmed = filled.trim_end();
         if !trimmed.is_empty() {
             output_lines.push(render_styled_text(trimmed));
@@ -362,6 +351,76 @@ pub fn render_template(config: &Config, state: &StatuslineState, terminal_width:
     }
 
     output_lines.join("\n")
+}
+
+/// Git 状態とレビュー状態を、`format` が使う部品に必要な分だけ収集する
+pub struct Collected {
+    pub git: Option<GitStatus>,
+    pub reviews: RepoReviews,
+}
+
+/// Squirrel Notifier のサマリからカレントリポジトリ分のレビュー状態を読み込む
+fn load_repo_reviews(integration: &SquirrelNotifierConfig, repo: Option<&str>) -> RepoReviews {
+    let Some(repo) = repo else {
+        return RepoReviews::default();
+    };
+    let path = integration
+        .summary_path
+        .as_deref()
+        .map(expand_env_path)
+        .or_else(default_summary_path);
+    let Some(summary) = path.as_deref().and_then(load_summary) else {
+        return RepoReviews::default();
+    };
+    let (active, waiting) = reviews_for_repo(&summary, repo);
+    RepoReviews {
+        active: active.into_iter().cloned().collect(),
+        waiting: waiting.into_iter().cloned().collect(),
+    }
+}
+
+/// 副作用のある入力（Git のリポジトリ読み取り、サマリ JSON の読み込み）を集める
+pub fn collect(config: &Config, state: &StatuslineState) -> Collected {
+    let parts = used_parts(&config.format);
+    let uses = |id: &str| parts.contains(&id);
+
+    let needs_branch = uses("git_branch") && !config.git_branch.disabled;
+    let needs_dirty = uses("git_status") && !config.git_status.disabled;
+    let needs_review =
+        uses("review") && !config.review.disabled && config.integrations.squirrel_notifier.enabled;
+
+    let git = (needs_branch || needs_dirty || needs_review).then(|| {
+        get_git_status(
+            &state.cwd,
+            GitQuery {
+                dirty: needs_dirty,
+                remote_repo: needs_review,
+            },
+        )
+    });
+
+    let reviews = if needs_review {
+        load_repo_reviews(
+            &config.integrations.squirrel_notifier,
+            git.as_ref().and_then(|g| g.remote_repo.as_deref()),
+        )
+    } else {
+        RepoReviews::default()
+    };
+
+    Collected { git, reviews }
+}
+
+/// 設定テンプレートに従ってステータスラインを描画する（収集してから合成する）
+pub fn render_template(config: &Config, state: &StatuslineState, terminal_width: usize) -> String {
+    let collected = collect(config, state);
+    compose(
+        config,
+        state,
+        collected.git.as_ref(),
+        &collected.reviews,
+        terminal_width,
+    )
 }
 
 /// デフォルトの 3 行ステータスライン描画
@@ -598,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_review_for_repo_reads_summary_path() {
+    fn test_load_repo_reviews_reads_summary_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("statusline-summary.json");
         std::fs::write(
@@ -627,11 +686,96 @@ mod tests {
             ("no-summary", &missing, Some("owner/repo"), ""),
         ];
         for (name, integration, repo, expected) in cases {
-            assert_eq!(
-                render_review_for_repo(&cfg, integration, repo),
-                expected,
-                "{name}"
-            );
+            let reviews = load_repo_reviews(integration, repo);
+            let active: Vec<&ActiveReview> = reviews.active.iter().collect();
+            let waiting: Vec<&QueuedReview> = reviews.waiting.iter().collect();
+            assert_eq!(render_review(&cfg, &active, &waiting), expected, "{name}");
         }
+    }
+
+    fn compose_state() -> StatuslineState {
+        StatuslineState {
+            cwd: PathBuf::from("/nonexistent/dev/myproject"),
+            model: Some("Claude Opus".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn compose_git(branch: &str, is_dirty: bool) -> GitStatus {
+        GitStatus {
+            branch: Some(branch.to_string()),
+            is_dirty,
+            remote_repo: None,
+        }
+    }
+
+    #[test]
+    fn test_compose_uses_only_given_inputs() {
+        let mut config = Config {
+            format: "$git_branch$git_status\n$review".to_string(),
+            ..Default::default()
+        };
+        // 収集済みの入力だけで描画できる。存在しない cwd・サマリを指していても、読みに行かない
+        config.integrations.squirrel_notifier.summary_path =
+            Some("/nonexistent/statusline-summary.json".to_string());
+        let reviews = RepoReviews {
+            active: vec![active(31, 2, None)],
+            waiting: vec![waiting(32, 1, "opened")],
+        };
+        let state = compose_state();
+        let dirty = compose_git("main", true);
+        let clean = compose_git("main", false);
+        let cases = [
+            ("dirty", Some(&dirty), "🌿 main ✗\n🐿 🔍#31 r2 ⏳#32 r1"),
+            ("clean", Some(&clean), "🌿 main\n🐿 🔍#31 r2 ⏳#32 r1"),
+            ("no-git", None, "🐿 🔍#31 r2 ⏳#32 r1"),
+        ];
+        for (name, git, expected) in cases {
+            let rendered = compose(&config, &state, git, &reviews, 80);
+            assert_eq!(strip_ansi(&rendered), expected, "{name}");
+        }
+
+        config.integrations.squirrel_notifier.enabled = false;
+        let rendered = compose(&config, &state, Some(&dirty), &reviews, 80);
+        assert_eq!(strip_ansi(&rendered), "🌿 main ✗", "integration-disabled");
+    }
+
+    #[test]
+    fn test_compose_does_not_reexpand_values() {
+        let config = Config {
+            format: "$git_branch $model".to_string(),
+            git_branch: GitBranchConfig {
+                format: "$symbol$branch".to_string(),
+                symbol: "$model:".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let git = compose_git("$model", false);
+        let rendered = compose(
+            &config,
+            &compose_state(),
+            Some(&git),
+            &RepoReviews::default(),
+            80,
+        );
+        assert_eq!(strip_ansi(&rendered), "$model:$model 🤖 Claude Opus");
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }

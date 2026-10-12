@@ -39,3 +39,10 @@ pub struct ActiveReview {
     pub round: u32,
     pub agent: Option<String>,
 }
+
+/// 1 つのリポジトリに属するレビュー状態。描画の入力として渡す
+#[derive(Debug, Clone, Default)]
+pub struct RepoReviews {
+    pub active: Vec<ActiveReview>,
+    pub waiting: Vec<QueuedReview>,
+}
