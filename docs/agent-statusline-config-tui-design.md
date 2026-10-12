@@ -103,7 +103,7 @@ TUI 用に、失敗を返す読み込み API を別に用意する。
 load_config_strict(path) -> Result<LoadedConfig, ConfigError>
 LoadedConfig { config: Config, document: DocumentMut, source: ConfigSource }
 ConfigSource = Existing { path: ResolvedPath, fingerprint: ContentHash }
-             | Missing  { target: PathBuf }   // まだ作られていない。履歴・ハッシュは持たない
+             | Missing  { target: PathBuf, from_link: bool }   // まだ作られていない。履歴・ハッシュは持たない。from_link はリンク切れのリンクを辿って決めた保存先か（§5.4）
 ```
 
 - 既存の `load_config` は、`render` が「設定が壊れていても止まらない」ために現状のまま残す。
@@ -182,7 +182,7 @@ Token  = Part(id) | Literal(String)
 1. **保存先**：`fs::canonicalize` で解決した実ファイルに書く。標準の設定パス（リンク）は置換しない。
 2. **書き込み**：実ファイルと同じディレクトリに一時ファイルを書き、`rename` で置換する。失敗した場合は旧内容を保ち、エラーを表示する。通常ファイルのコピーに黙って切り替えない。
 3. **競合検知**：読み込み時の内容ハッシュを保存直前に再計算して比較する。変更されていた場合（削除された場合を含む）は上書きを止め、「再読み込み」「差分の確認」「別名で保存」を選べる。ファイル監視は補助にとどめ、保存直前の再確認を省略しない。
-4. **履歴**：保存前の内容を、ローカルのデータディレクトリ（`dirs::data_local_dir()/agent-statusline/history/`）へ世代保存する。保持数は 20 世代とする。クラウド側の履歴と二重にならないよう、履歴自体は同期の対象にしない。復元は、差分を示してから行う。`installer/patcher.rs` のバックアップ処理を再利用できるかは、実装時に確認する。
+4. **履歴**：保存前の内容を、ローカルのデータディレクトリ（`dirs::data_local_dir()/agent-statusline/history/`）へ世代保存する。保持数は 20 世代とする。クラウド側の履歴と二重にならないよう、履歴自体は同期の対象にしない。復元は、差分を示してから行う。複数の設定ファイルの履歴が混ざらないよう、実ファイルのパスのハッシュ（先頭 8 バイトの 16 進）でサブディレクトリを分ける。`installer/patcher.rs` のバックアップ処理は、保存先と対象が異なる（クライアントの設定 JSON のバックアップ）ため再利用せず、`editor/history.rs` に別実装した。
 
 **`Missing`（初回保存）**
 
