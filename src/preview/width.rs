@@ -111,8 +111,7 @@ pub fn fit_output(output: &str, width: usize, overflow: Overflow) -> Vec<String>
         .collect()
 }
 
-/// 装飾を取り除く（テスト用）
-#[cfg(test)]
+/// 装飾を取り除く
 pub fn strip_ansi(text: &str) -> String {
     pieces(text)
         .filter_map(|piece| match piece {
