@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - 設定を対話的に編集・プレビューする TUI（`agent-statusline config`）の基本設計書 `docs/agent-statusline-config-tui-design.md` を追加。実装は含まない。
 
+- `[directory] symbol`（既定 `"📁 "`）を追加。既定の `directory.format` は `$symbol[$folder]($folder_style) …` になったが、既定の出力は変わらない。絵文字を `format` に直書きしている既存の設定も、そのまま動く。
+
 ### Changed
+- 部品（`directory`、`git_branch` など 10 個）の ID・設定キー・`format` で使える変数・描画関数を、部品レジストリ `engine/parts.rs` に集約した。描画の分岐はレジストリ起点になり、既定の設定との整合を検査するテストを追加した。出力は変わらない（設定 TUI フェーズ 0-2）。
 - 描画を、副作用のある「収集」（Git の読み取り、サマリ JSON の読み込み）と、収集済みの入力だけから合成する純関数 `compose` に分離した。`render` の出力は変わらない。設定 TUI のプレビューが Git やサマリに触れずに描画できるようにするための前提整備（設定 TUI フェーズ 0-1）。
 
 ### Fixed

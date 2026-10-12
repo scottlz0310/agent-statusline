@@ -2,6 +2,7 @@ use crate::engine::config::{
     AgentStateConfig, Config, ContextConfig, DirectoryConfig, GitBranchConfig, GitStatusConfig,
     ModelConfig, PlanConfig, QuotaConfig, ReviewConfig, SandboxConfig, SquirrelNotifierConfig,
 };
+use crate::engine::parts::{PartInput, find, part_ids};
 use crate::engine::style::{pct_style_name, render_styled_text};
 use crate::engine::template::{Token, expand, tokenize};
 use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
@@ -12,20 +13,6 @@ use crate::modules::git::{GitQuery, GitStatus, get_git_status};
 use crate::modules::quota::format_reset_seconds;
 use crate::modules::review::{default_summary_path, load_summary, reviews_for_repo};
 use crate::sink::notifier::expand_env_path;
-
-/// トップレベルの `format` で使える部品 ID
-pub const PART_IDS: [&str; 10] = [
-    "directory",
-    "git_branch",
-    "git_status",
-    "sandbox",
-    "model",
-    "context",
-    "agent_state",
-    "plan",
-    "quota",
-    "review",
-];
 
 pub fn render_directory(
     cfg: &DirectoryConfig,
@@ -45,6 +32,7 @@ pub fn render_directory(
     expand(
         &cfg.format,
         &[
+            ("symbol", &cfg.symbol),
             ("folder_style", &cfg.folder_style),
             ("folder", &folder),
             ("path_style", &cfg.path_style),
@@ -281,41 +269,13 @@ pub fn render_review(
 
 /// `format` が参照している部品 ID（既知の部品 ID の最長一致）
 fn used_parts(format: &str) -> Vec<&str> {
-    tokenize(format, &PART_IDS)
+    tokenize(format, &part_ids())
         .into_iter()
         .filter_map(|token| match token {
             Token::Var(id) => Some(id),
             Token::Text(_) => None,
         })
         .collect()
-}
-
-/// 部品 ID に対応する部品を描画する。ID は `PART_IDS` のいずれかであること
-fn render_part(
-    id: &str,
-    config: &Config,
-    state: &StatuslineState,
-    git: Option<&GitStatus>,
-    reviews: &RepoReviews,
-    terminal_width: usize,
-) -> String {
-    match id {
-        "directory" => render_directory(&config.directory, state, terminal_width),
-        "git_branch" => render_git_branch(&config.git_branch, git),
-        "git_status" => render_git_status(&config.git_status, git),
-        "sandbox" => render_sandbox(&config.sandbox, state),
-        "model" => render_model(&config.model, state),
-        "context" => render_context(&config.context, state),
-        "agent_state" => render_agent_state(&config.agent_state, state),
-        "plan" => render_plan(&config.plan, state),
-        "quota" => render_quota(&config.quota, state),
-        "review" if config.integrations.squirrel_notifier.enabled => {
-            let active: Vec<&ActiveReview> = reviews.active.iter().collect();
-            let waiting: Vec<&QueuedReview> = reviews.waiting.iter().collect();
-            render_review(&config.review, &active, &waiting)
-        }
-        _ => String::new(),
-    }
 }
 
 /// 収集済みの入力だけからステータスラインを合成する純関数。Git・ファイル・環境変数には触れない
@@ -326,14 +286,16 @@ pub fn compose(
     reviews: &RepoReviews,
     terminal_width: usize,
 ) -> String {
+    let input = PartInput {
+        state,
+        git,
+        reviews,
+        terminal_width,
+    };
     let rendered: Vec<(&str, String)> = used_parts(&config.format)
         .into_iter()
-        .map(|id| {
-            (
-                id,
-                render_part(id, config, state, git, reviews, terminal_width),
-            )
-        })
+        .filter_map(|id| find(id))
+        .map(|part| (part.id, (part.render)(config, &input)))
         .collect();
     let vars: Vec<(&str, &str)> = rendered
         .iter()
@@ -762,6 +724,42 @@ mod tests {
         assert_eq!(strip_ansi(&rendered), "$model:$model 🤖 Claude Opus");
     }
 
+    #[test]
+    fn test_render_directory_symbol() {
+        let state = compose_state();
+        let with_symbol = |symbol: &str| DirectoryConfig {
+            symbol: symbol.to_string(),
+            ..Default::default()
+        };
+        // `symbol` 導入前の設定（絵文字を format に直書き）は、そのまま動く
+        let legacy = DirectoryConfig {
+            format: "📁 [$folder]($folder_style)".to_string(),
+            symbol: "> ".to_string(),
+            ..Default::default()
+        };
+        let cases = [
+            (
+                "default",
+                DirectoryConfig::default(),
+                "📁 myproject [/nonexistent/dev/myproject] ",
+            ),
+            (
+                "custom-symbol",
+                with_symbol("> "),
+                "> myproject [/nonexistent/dev/myproject] ",
+            ),
+            (
+                "empty-symbol",
+                with_symbol(""),
+                "myproject [/nonexistent/dev/myproject] ",
+            ),
+            ("legacy-literal-format", legacy, "📁 myproject"),
+        ];
+        for (name, cfg, expected) in cases {
+            let rendered = render_styled_text(&render_directory(&cfg, &state, 80));
+            assert_eq!(strip_ansi(&rendered), expected, "{name}");
+        }
+    }
     fn strip_ansi(s: &str) -> String {
         let mut out = String::new();
         let mut chars = s.chars();
