@@ -158,6 +158,8 @@ fn draw_preview(
 
 /// 生 ANSI で端末へ直接出す行を、枠の内側（`area`）に収める。
 /// 行数は高さまで、各行は幅までにし、幅より広い 1 文字しか入らない行は空にする。
+/// 改行などの制御文字は、カーソルを領域の外へ動かすので、見える文字に置き換える
+/// （部品の `format` に `\n` を書けるため、部品の表示例にも現れる）。
 /// ratatui を介さないので、はみ出すと枠や部品の表示を上書きしてしまう
 fn clip_to_area(lines: &[String], area: Rect) -> Vec<String> {
     if area.width == 0 || area.height == 0 {
@@ -168,12 +170,25 @@ fn clip_to_area(lines: &[String], area: Rect) -> Vec<String> {
         .iter()
         .take(usize::from(area.height))
         .map(|line| {
-            let clipped = fit_line(line, width, Overflow::Truncate).swap_remove(0);
+            let clipped =
+                fit_line(&defang_controls(line), width, Overflow::Truncate).swap_remove(0);
             if display_width(&clipped) <= width {
                 clipped
             } else {
                 String::new()
             }
+        })
+        .collect()
+}
+
+/// 改行（`\n`、`\r`）は `⏎`、それ以外の制御文字は `\u{fffd}` にする。装飾の開始（ESC）は残す
+fn defang_controls(line: &str) -> String {
+    line.chars()
+        .map(|c| match c {
+            '\n' | '\r' => '⏎',
+            '\x1b' => c,
+            c if c.is_control() => '\u{fffd}',
+            c => c,
         })
         .collect()
 }
@@ -533,6 +548,52 @@ mod tests {
             );
         }
         assert_eq!(clip_to_area(&lines, area(5, 0)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_clip_to_area_neutralizes_control_characters() {
+        let area = Rect::new(0, 0, 20, 1);
+        // (名前, 入力, 期待する結果)
+        let cases = [
+            ("lf", "A\nB", "A⏎B"),
+            ("crlf", "A\r\nB", "A⏎⏎B"),
+            ("tab-and-bell", "A\tB\x07", "A\u{fffd}B\u{fffd}"),
+            // 装飾の開始は残す
+            ("sgr-kept", "\x1b[1mA\x1b[0m", "\x1b[1mA\x1b[0m"),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(
+                clip_to_area(&[input.to_string()], area),
+                vec![expected.to_string()],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_part_sample_with_newline_stays_on_one_row() {
+        // 部品の `format` に改行を書いても、表示例は 1 行の領域に収まる
+        let mut config = Config::default();
+        config.directory.format = "A\nB".to_string();
+        let ctx = ViewContext {
+            config: &config,
+            source_label: "（テスト）",
+        };
+        let app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut overlays = Vec::new();
+        terminal
+            .draw(|frame| overlays = draw(frame, &app, &ctx))
+            .unwrap();
+        // 部品の表示例は、プレビューの次から。どの overlay にも、改行・復帰は含まれない
+        let sample = &overlays[1];
+        assert_eq!(sample.lines.len(), 1);
+        assert!(sample.lines[0].contains("A⏎B"), "{:?}", sample.lines);
+        for overlay in &overlays {
+            for line in &overlay.lines {
+                assert!(!line.contains(['\n', '\r']), "{line:?}");
+            }
+        }
     }
 
     #[test]
