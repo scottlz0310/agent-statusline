@@ -120,22 +120,25 @@ ConfigSource = Existing { path: ResolvedPath, fingerprint: ContentHash }
 ```text
 PartSpec {
     id,                 // "git_branch"。`$git_branch` と config のテーブル名に対応
-    label,              // 部品一覧に出す名前
-    category,           // §6.2
-    placeholders,       // format 内で使える変数（`$symbol`, `$branch` …）
     props: [PropSpec],  // 編集できるキー
-    visibility,         // 非表示になる条件の説明（§6.5）
-    sample,             // 説明用のサンプル状態
+    render,             // 収集済みの入力から、その部品を描画する関数
+    // 以下は TUI（フェーズ 1）で、使う側と同時に追加する
+    // label, category（§6.2）, visibility（§6.5）, sample
 }
-PropSpec { key, kind, default, suggestions }
-kind = Symbol | Style | Threshold{min,max} | Text | Bool | Separator
+PropSpec { key, kind }  // default は Config::default() から得る。suggestions は TUI で追加する
+kind = Symbol | Style | Threshold | Text | Bool | Separator | Format(placeholders)
 ```
+
+- `format` 文字列の変数は、部品単位ではなくキー単位で持つ（`Format(placeholders)`）。`review` は `format`・`active_format`・`waiting_format` で使える変数が異なるため。
+- `Threshold` の範囲は 0〜100 の整数。`threshold_warning < threshold_critical` の検証は編集サービス（§5.3）で行う。
+- `[directory] truncation_mode` は、設定には存在するが描画では使われていない。レジストリには現状どおり載せている。TUI で編集可能にする前に、実装するか削除するかを決める。
 
 レジストリには、次の整合を保つテストを置く。
 
 - `Config::default()` を TOML にしたときのすべてのキーが、レジストリの `props` に存在する（Config に項目を足したのにレジストリへ足し忘れる、を検知する）。
 - 部品 ID は、他の部品 ID の接頭辞にならない。トップレベルの `format` では `$context_x` のような固定テキストの扱いが部品の追加で変わるため、これを防ぐ。モジュール内の変数名は、`$folder` と `$folder_style` のように接頭辞の関係があってよい（§4.2 の最長一致で解決する）。
-- 各部品の既定の `format` が使う変数は、`placeholders` に含まれる。
+- 各部品の既定の `format` が使う変数は、その `Format` の変数に含まれる。
+- 既定のトップレベル `format` が使う部品 ID は、すべてレジストリに登録されている。
 
 これは TUI がなくても、描画の重複を減らす価値のあるリファクタリングである。
 
@@ -297,10 +300,11 @@ Token  = Part(id) | Literal(String)
 
 ```text
 src/
-├── parts/        # 部品レジストリ（PartSpec、PropSpec）。描画・TUI・検証の共通の根拠
 ├── engine/
-│   ├── compose.rs   # 純関数の合成。収集済みの入力を受け取る
-│   └── …            # 既存の config / formatter / style
+│   ├── parts.rs     # 部品レジストリ（PartSpec、PropSpec）。描画・TUI・検証の共通の根拠
+│   ├── template.rs  # `$name` の字句解析と 1 パス展開
+│   ├── formatter.rs # 部品ごとの描画、`compose`（純関数）、`collect`（収集）
+│   └── …            # 既存の config / style
 ├── editor/       # LoadedConfig、配置モデル、TOML の部分更新、検証、保存、履歴
 ├── preview/      # シナリオ（サンプル状態）、幅・折り返しの模擬
 └── tui/          # ratatui による画面と入力。editor / preview / parts を呼ぶだけに保つ

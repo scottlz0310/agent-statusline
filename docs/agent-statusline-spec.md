@@ -122,7 +122,8 @@ $quota
 """
 
 [directory]
-format = "📁 [$folder]($folder_style) [$path]($path_style) "
+symbol = "📁 "
+format = "$symbol[$folder]($folder_style) [$path]($path_style) "
 folder_style = "bold cyan"
 path_style = "dimmed"
 truncation_mode = "middle" # 中間省略 (/foo/.../bar)

@@ -72,6 +72,9 @@ pub struct DirectoryConfig {
     #[serde(default = "default_directory_format")]
     pub format: String,
 
+    #[serde(default = "default_directory_symbol")]
+    pub symbol: String,
+
     #[serde(default = "default_directory_folder_style")]
     pub folder_style: String,
 
@@ -86,7 +89,10 @@ pub struct DirectoryConfig {
 }
 
 fn default_directory_format() -> String {
-    "📁 [$folder]($folder_style) [\\[$path\\]]($path_style) ".to_string()
+    "$symbol[$folder]($folder_style) [\\[$path\\]]($path_style) ".to_string()
+}
+fn default_directory_symbol() -> String {
+    "📁 ".to_string()
 }
 fn default_directory_folder_style() -> String {
     "bold cyan".to_string()
@@ -102,6 +108,7 @@ impl Default for DirectoryConfig {
     fn default() -> Self {
         Self {
             format: default_directory_format(),
+            symbol: default_directory_symbol(),
             folder_style: default_directory_folder_style(),
             path_style: default_directory_path_style(),
             truncation_mode: default_truncation_mode(),
