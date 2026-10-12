@@ -548,29 +548,43 @@ impl Default for SquirrelNotifierConfig {
 
 /// 設定ファイルパスを探索・解決する
 pub fn resolve_config_path(custom_path: Option<&Path>) -> Option<PathBuf> {
+    resolve_config_path_with(
+        custom_path,
+        std::env::var("AGENT_STATUSLINE_CONFIG").ok().as_deref(),
+        dirs::config_dir().as_deref(),
+        dirs::home_dir().as_deref(),
+        Path::exists,
+    )
+}
+
+/// `resolve_config_path` の本体。環境変数・ディレクトリ・存在確認を引数で受け取る
+pub fn resolve_config_path_with(
+    custom_path: Option<&Path>,
+    env_path: Option<&str>,
+    config_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     if let Some(path) = custom_path {
         return Some(path.to_path_buf());
     }
 
-    if let Ok(env_path) = std::env::var("AGENT_STATUSLINE_CONFIG")
+    if let Some(env_path) = env_path
         && !env_path.trim().is_empty()
     {
         return Some(PathBuf::from(env_path));
     }
 
-    if let Some(config_dir) = dirs::config_dir() {
-        let p = config_dir.join("agent-statusline").join("config.toml");
-        if p.exists() {
+    if let Some(config_dir) = config_dir {
+        let p = default_config_path(config_dir);
+        if exists(&p) {
             return Some(p);
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
-        let p = home
-            .join(".config")
-            .join("agent-statusline")
-            .join("config.toml");
-        if p.exists() {
+    if let Some(home) = home_dir {
+        let p = default_config_path(&home.join(".config"));
+        if exists(&p) {
             return Some(p);
         }
     }
@@ -578,7 +592,10 @@ pub fn resolve_config_path(custom_path: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// 設定ファイルをロードするか、存在しない・エラー時はデフォルト設定を返す
+/// 設定ディレクトリ配下の標準の設定ファイルパス
+pub fn default_config_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("agent-statusline").join("config.toml")
+}
 pub fn load_config(custom_path: Option<&Path>) -> Config {
     let Some(path) = resolve_config_path(custom_path) else {
         return Config::default();
@@ -608,6 +625,14 @@ pub fn load_config(custom_path: Option<&Path>) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Case<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        Vec<PathBuf>,
+        Option<PathBuf>,
+    );
 
     #[test]
     fn test_default_config_parses_and_matches() {
@@ -670,5 +695,80 @@ style = "cyan"
         std::fs::write(&invalid_file, "this is not valid toml = [[[").unwrap();
         let invalid_cfg = load_config(Some(&invalid_file));
         assert_eq!(invalid_cfg.format, DEFAULT_FORMAT);
+    }
+
+    #[test]
+    fn test_resolve_config_path_with_priority() {
+        let config_dir = Path::new("/c");
+        let home = Path::new("/h");
+        let std_path = PathBuf::from("/c/agent-statusline/config.toml");
+        let home_path = PathBuf::from("/h/.config/agent-statusline/config.toml");
+        let cases: [Case; 8] = [
+            (
+                "custom-wins",
+                Some("/x.toml"),
+                Some("/env.toml"),
+                vec![std_path.clone()],
+                Some("/x.toml".into()),
+            ),
+            (
+                "env",
+                None,
+                Some("/env.toml"),
+                vec![std_path.clone()],
+                Some("/env.toml".into()),
+            ),
+            (
+                "blank-env-ignored",
+                None,
+                Some("  "),
+                vec![std_path.clone()],
+                Some(std_path.clone()),
+            ),
+            (
+                "standard",
+                None,
+                None,
+                vec![std_path.clone(), home_path.clone()],
+                Some(std_path.clone()),
+            ),
+            (
+                "home-fallback",
+                None,
+                None,
+                vec![home_path.clone()],
+                Some(home_path),
+            ),
+            ("none-exists", None, None, vec![], None),
+            (
+                "custom-need-not-exist",
+                Some("/missing.toml"),
+                None,
+                vec![],
+                Some("/missing.toml".into()),
+            ),
+            (
+                "env-need-not-exist",
+                None,
+                Some("/missing.toml"),
+                vec![],
+                Some("/missing.toml".into()),
+            ),
+        ];
+        for (name, custom, env, existing, expected) in cases {
+            let resolved = resolve_config_path_with(
+                custom.map(Path::new),
+                env,
+                Some(config_dir),
+                Some(home),
+                |p| existing.iter().any(|e| e == p),
+            );
+            assert_eq!(resolved, expected, "{name}");
+        }
+        assert_eq!(
+            resolve_config_path_with(None, None, None, None, |_| true),
+            None,
+            "no-dirs"
+        );
     }
 }
