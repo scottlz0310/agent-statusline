@@ -329,7 +329,9 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
                 .as_ref()
                 .filter(|input| input.part == part.id && input.key == prop.key);
             if let Some(input) = editing {
-                spans.extend(input_spans(&input.value(), input.cursor()));
+                // 行頭の印（`> `）、項目名、区切りの空白を除いた、入力欄に使える幅
+                let room = usize::from(inner.width).saturating_sub(2 + PROP_KEY_WIDTH + 1);
+                spans.extend(input_spans(&input.value(), input.cursor(), room));
                 return Line::from(spans);
             }
             let current = app.draft.prop_value(part.id, prop.key);
@@ -361,19 +363,73 @@ fn show_value(value: &PropValue) -> String {
     }
 }
 
-/// 入力中の文字列。カーソルの位置の文字（末尾なら空白）を反転する
-fn input_spans(value: &str, cursor: usize) -> Vec<Span<'static>> {
+/// 入力中の文字列。カーソルの位置の文字（末尾なら空白）を反転する。
+/// `width`（`[` `]` を含む表示幅）に収まらないときは、カーソルが見える範囲へ横にずらし、
+/// 切れた側の端に `…` を出す
+fn input_spans(value: &str, cursor: usize, width: usize) -> Vec<Span<'static>> {
     let chars: Vec<char> = value.chars().collect();
-    let before: String = chars.iter().take(cursor).collect();
+    let char_width = |c: char| display_width(&c.to_string());
+    let cursor_cell = chars.get(cursor).map_or(1, |c| char_width(*c).max(1));
+    // カーソルの前の文字を、後ろから詰めて、カーソルが収まる最小の開始位置を選ぶ
+    let inner = width.saturating_sub(2).max(cursor_cell);
+    let fits = |start: usize, room: usize| {
+        let before: usize = chars[start..cursor.min(chars.len())]
+            .iter()
+            .map(|c| char_width(*c))
+            .sum();
+        before + cursor_cell <= room
+    };
+    // カーソルの後ろに文字があるときは、右を切る場合の `…` の 1 列を、常に空けておく
+    let reserve = usize::from(cursor + 1 < chars.len());
+    let mut start = 0;
+    let mut lead = 0;
+    if !fits(0, inner.saturating_sub(reserve).max(cursor_cell)) {
+        // 左を切るので、`…` の 1 列を引く
+        lead = 1;
+        let room = inner.saturating_sub(lead + reserve).max(cursor_cell);
+        while start < cursor && !fits(start, room) {
+            start += 1;
+        }
+    }
+    let before: String = chars[start..cursor.min(chars.len())].iter().collect();
     let at = chars.get(cursor).map_or(" ".to_string(), char::to_string);
-    let after: String = chars.iter().skip(cursor + 1).collect();
-    vec![
-        Span::raw("["),
-        Span::raw(before),
-        Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
-        Span::raw(after),
-        Span::raw("]"),
-    ]
+    let used = lead + display_width(&before) + cursor_cell;
+    let room = inner.saturating_sub(used);
+
+    // カーソルの後ろは、収まる分だけ。残りがあれば、最後の 1 列を `…` にする
+    let rest = chars.get(cursor + 1..).unwrap_or_default();
+    let rest_width: usize = rest.iter().map(|c| char_width(*c)).sum();
+    let (after, trail) = if rest_width <= room {
+        (rest.iter().collect::<String>(), false)
+    } else {
+        let mut taken = String::new();
+        let mut taken_width = 0;
+        for c in rest {
+            if taken_width + char_width(*c) + 1 > room {
+                break;
+            }
+            taken.push(*c);
+            taken_width += char_width(*c);
+        }
+        (taken, true)
+    };
+
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut spans = vec![Span::raw("[")];
+    if lead > 0 {
+        spans.push(Span::styled("…", dim));
+    }
+    spans.push(Span::raw(before));
+    spans.push(Span::styled(
+        at,
+        Style::default().add_modifier(Modifier::REVERSED),
+    ));
+    spans.push(Span::raw(after));
+    if trail {
+        spans.push(Span::styled("…", dim));
+    }
+    spans.push(Span::raw("]"));
+    spans
 }
 
 /// 状態行。入力中に受け付けられない値になっていれば、その理由、直前の操作が受け付けられなかった理由、
@@ -1006,6 +1062,103 @@ mod tests {
             shown.contains("検証: エラー 0 件 / 警告 1 件 — nothing: "),
             "{shown}"
         );
+    }
+
+    /// `input_spans` の結果を、文字列（装飾を除く）と、反転した文字に分ける
+    fn flatten(spans: &[Span<'static>]) -> (String, String) {
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        let cursor: String = spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| span.content.as_ref())
+            .collect();
+        (text, cursor)
+    }
+
+    #[test]
+    fn test_input_spans_scroll_to_keep_the_cursor_visible() {
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+        let wide = "あいうえおかきくけこ";
+        // (名前, 値, カーソル, 幅, 期待する表示, 期待する反転の文字)
+        let cases = [
+            ("fits", "abc", 3, 20, "[abc ]", " "),
+            ("fits-cursor-in-the-middle", "abc", 1, 20, "[abc]", "b"),
+            ("empty", "", 0, 10, "[ ]", " "),
+            // 末尾にカーソルがあると、左を切る
+            ("long-cursor-at-end", alphabet, 26, 10, "[…uvwxyz ]", " "),
+            // 先頭にカーソルがあると、右を切る
+            ("long-cursor-at-start", alphabet, 0, 10, "[abcdefg…]", "a"),
+            // 途中なら、両側を切る
+            (
+                "long-cursor-in-the-middle",
+                alphabet,
+                13,
+                12,
+                "[…ghijklmn…]",
+                "n",
+            ),
+            ("wide-cursor-at-end", wide, 10, 12, "[…きくけこ ]", " "),
+            ("wide-cursor-at-start", wide, 0, 12, "[あいうえ…]", "あ"),
+            ("wide-cursor-on-a-wide-char", wide, 5, 8, "[…おか…]", "か"),
+        ];
+        for (name, value, cursor, width, expected, reversed) in cases {
+            let (text, at) = flatten(&input_spans(value, cursor, width));
+            assert_eq!(text, expected, "{name}");
+            assert_eq!(at, reversed, "{name}: 反転する文字");
+            assert!(
+                display_width(&text) <= width,
+                "{name}: {text} が幅 {width} を超える"
+            );
+        }
+    }
+
+    #[test]
+    fn test_input_spans_survive_tiny_widths() {
+        for width in 0..8 {
+            for cursor in 0..6 {
+                let spans = input_spans("あいabc🌿", cursor, width);
+                let (_, at) = flatten(&spans);
+                assert!(!at.is_empty(), "{width}/{cursor}: カーソルが消える");
+            }
+        }
+    }
+
+    #[test]
+    fn test_editing_a_long_value_keeps_the_cursor_inside_the_pane() {
+        // 80 列の端末で、既定の `directory.format` を編集しても、カーソルが入力欄に出る
+        let mut app = props_app("$directory");
+        press(&mut app, KeyCode::Enter); // format（先頭の行）
+        assert!(app.input.is_some());
+        for (name, keys) in [
+            ("end", vec![]),
+            ("home", vec![KeyCode::Home]),
+            ("type-at-home", vec![KeyCode::Char('Z'), KeyCode::Char('Y')]),
+            ("end-again", vec![KeyCode::End]),
+        ] {
+            for key in keys {
+                press(&mut app, key);
+            }
+            let ctx = ViewContext {
+                source_label: "（テスト）",
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+            terminal.draw(|frame| _ = draw(frame, &app, &ctx)).unwrap();
+            let buffer = terminal.backend().buffer();
+            // 入力欄は、項目名の列（x = 1 + 2 + 20 + 1）より右。そこに反転したセルが 1 つ以上ある
+            let value_x = 1 + 2 + 20 + 1;
+            let visible = (0..buffer.area.height).any(|y| {
+                (value_x..buffer.area.width - 1).any(|x| {
+                    buffer[(x, y)].modifier.contains(Modifier::REVERSED)
+                        && screen_row_has_input_marker(buffer, y)
+                })
+            });
+            assert!(visible, "{name}: カーソルが入力欄に出ない");
+        }
+    }
+
+    /// その行が、入力中の欄（`[` で始まる）を含むか
+    fn screen_row_has_input_marker(buffer: &ratatui::buffer::Buffer, y: u16) -> bool {
+        (0..buffer.area.width).any(|x| buffer[(x, y)].symbol() == "[")
     }
 
     #[test]
