@@ -1,4 +1,4 @@
-//! 設定 TUI（`agent-statusline config`）。現状は、配置の編集（部品の追加を含む）とプレビュー（設定 TUI フェーズ 1-2）。保存はまだできない。
+//! 設定 TUI（`agent-statusline config`）。現状は、配置とプロパティの編集とプレビュー（設定 TUI フェーズ 1-3）。保存はまだできない。
 //!
 //! 状態遷移は `app`、部品一覧の項目は `palette`、画面は `view` に置き、ここは端末とイベントの入出力だけを行う。
 
@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::queue;
 use ratatui::crossterm::style::Print;
 
-use crate::editor::layout::Layout;
+use crate::editor::draft::Draft;
 use crate::editor::load::{ConfigEnv, ConfigSource, load_config_strict};
 use app::App;
 use view::{RawOverlay, ViewContext, draw};
@@ -36,13 +36,13 @@ pub fn run(config_path: Option<&Path>) -> io::Result<()> {
         }
     };
     let ctx = ViewContext {
-        config: &loaded.config,
         source_label: &label,
     };
+    let draft = Draft::new(loaded.config, loaded.document);
 
     enable_color_output();
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &ctx);
+    let result = event_loop(&mut terminal, &ctx, draft);
     ratatui::restore();
     result
 }
@@ -65,8 +65,8 @@ fn ensure_interactive(stdin_is_terminal: bool, stdout_is_terminal: bool) -> io::
     }
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext) -> io::Result<()> {
-    let mut app = App::new(Layout::parse(&ctx.config.format));
+fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext, draft: Draft) -> io::Result<()> {
+    let mut app = App::new(draft);
     while !app.should_quit {
         // 生 ANSI の出力は、ratatui が把握していない（差分描画で消えない）ので、毎回全体を描き直す
         terminal.clear()?;

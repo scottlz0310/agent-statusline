@@ -8,7 +8,10 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::LayoutEditor;
+use crate::editor::update::PropValue;
+use crate::editor::validate::Severity;
 use crate::engine::config::Config;
+use crate::engine::parts::PropKind;
 use crate::preview::width::{Overflow, display_width, fit_line};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
 use crate::tui::app::{App, Focus, WidthChoice};
@@ -21,9 +24,12 @@ const MAX_PREVIEW_ROWS: usize = 8;
 const LABEL_WIDTH: u16 = 20;
 /// 項目名の前の印（`> `）の幅
 const MARKER_WIDTH: u16 = 2;
+/// プロパティ欄の、項目名の列の幅（表示幅）
+const PROP_KEY_WIDTH: usize = 20;
+/// プロパティ欄で、同時に見せる行数の上限。それ以上は、選択中の行が見える位置までずらす
+const MAX_PROP_ROWS: usize = 7;
 
 pub struct ViewContext<'a> {
-    pub config: &'a Config,
     /// 編集対象の設定ファイルの説明（ヘッダーに表示する）
     pub source_label: &'a str,
 }
@@ -42,9 +48,11 @@ pub struct RawOverlay {
 pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> {
     // 部品一覧にフォーカスがあるときは、選択中の項目を仮に入れた配置を見せる
     let tentative = app.tentative_editor();
-    let editor = tentative.as_ref().unwrap_or(&app.editor);
+    let editor = tentative.as_ref().unwrap_or(app.draft.layout());
     // 編集中の配置を、設定の `format` として描画する（保存するまで、設定ファイルは変わらない）
-    let mut edited = ctx.config.clone();
+    // 文字列の入力中は、確定したと仮定した設定で描く（エラーのときは、確定済みの設定）
+    let live = app.input_preview().and_then(Result::ok);
+    let mut edited = live.unwrap_or_else(|| app.draft.config().clone());
     edited.format = editor.layout().to_format();
     let config = &edited;
     let area = frame.area();
@@ -67,10 +75,13 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
         .collect();
     let preview_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
 
-    let [header, preview, middle, footer] = Layout::vertical([
+    let props_height = u16::try_from(props_rows(app) + 2).unwrap_or(u16::MAX);
+    let [header, preview, middle, props, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Min(3),
+        Constraint::Length(props_height),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -87,22 +98,30 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
     );
 
     let mut overlays = vec![draw_preview(frame, app, preview, &lines, columns, too_wide)];
-    draw_layout(frame, app, editor, ctx.config, layout_area, columns);
-    overlays.extend(draw_parts(frame, app, ctx.config, parts, columns));
+    draw_layout(frame, app, editor, config, layout_area, columns);
+    overlays.extend(draw_parts(frame, app, config, parts, columns));
+    draw_props(frame, app, props);
+    frame.render_widget(status_line(app), status);
     frame.render_widget(
-        Line::from(footer_text(app.focus)).style(Style::default().add_modifier(Modifier::DIM)),
+        Line::from(footer_text(app)).style(Style::default().add_modifier(Modifier::DIM)),
         footer,
     );
     overlays
 }
 
-fn footer_text(focus: Focus) -> &'static str {
-    match focus {
+fn footer_text(app: &App) -> &'static str {
+    if app.input.is_some() {
+        return "入力中  Enter: 確定  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除";
+    }
+    match app.focus {
         Focus::Layout => {
-            "Tab: 部品一覧  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す  q: 終了"
+            "Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す  q: 終了"
         }
         Focus::Parts => {
             "Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す  q: 終了"
+        }
+        Focus::Props => {
+            "Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す  q: 終了"
         }
         Focus::Preview => "Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す  q: 終了",
     }
@@ -228,7 +247,7 @@ fn draw_layout(
                         Focus::Parts => Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::UNDERLINED),
-                        Focus::Preview => style.add_modifier(Modifier::UNDERLINED),
+                        Focus::Props | Focus::Preview => style.add_modifier(Modifier::UNDERLINED),
                     };
                 }
                 spans.push(Span::styled(token_label(token), style));
@@ -252,6 +271,157 @@ fn token_label(token: &Token) -> String {
         Token::Part(id) => id.clone(),
         Token::Literal(text) => format!("\"{}\"", text.replace(' ', "␣")),
     }
+}
+
+/// プロパティ欄の、見せる行数（対象の部品がないときは、案内の 1 行）
+fn props_rows(app: &App) -> usize {
+    app.target_part()
+        .map_or(1, |part| part.props.len().min(MAX_PROP_ROWS))
+}
+
+/// プロパティ欄。対象の部品の設定キーを、現在の値とともに並べる。
+/// 既定値と異なる値には、既定値を添える。文字列の入力中は、その行に入力中の内容とカーソルを出す
+fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Props;
+    let Some(part) = app.target_part() else {
+        let block = focus_block(" プロパティ ".to_string(), focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "（配置または部品一覧で部品を選ぶと、その部品のプロパティを編集できます）",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            inner,
+        );
+        return;
+    };
+    let block = focus_block(format!(" プロパティ: {} ", part.id), focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let height = usize::from(inner.height);
+    let selected = app.props_index();
+    let offset = (selected + 1).saturating_sub(height);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+
+    let rows: Vec<Line> = part
+        .props
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, prop)| {
+            let is_selected = index == selected;
+            let key = format!("{:<width$}", prop.key, width = PROP_KEY_WIDTH);
+            let key_style = if is_selected && focused {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                Span::raw(if is_selected { "> " } else { "  " }),
+                Span::styled(key, key_style),
+                Span::raw(" "),
+            ];
+            let editing = app
+                .input
+                .as_ref()
+                .filter(|input| input.part == part.id && input.key == prop.key);
+            if let Some(input) = editing {
+                spans.extend(input_spans(&input.value(), input.cursor()));
+                return Line::from(spans);
+            }
+            let current = app.draft.prop_value(part.id, prop.key);
+            spans.push(Span::raw(
+                current.as_ref().map_or_else(String::new, show_value),
+            ));
+            if let PropKind::Choice(choices) = prop.kind {
+                spans.push(Span::styled(format!("  [{}]", choices.join("|")), dim));
+            }
+            let default = app.draft.default_value(part.id, prop.key);
+            if current != default
+                && let Some(default) = default
+            {
+                let note = format!("  （既定: {}）", show_value(&default));
+                spans.push(Span::styled(note, dim));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// 値の表示。文字列は引用符で囲み、前後の空白が見えるようにする
+fn show_value(value: &PropValue) -> String {
+    match value {
+        PropValue::Str(text) => format!("\"{text}\""),
+        PropValue::Int(number) => number.to_string(),
+        PropValue::Bool(flag) => flag.to_string(),
+    }
+}
+
+/// 入力中の文字列。カーソルの位置の文字（末尾なら空白）を反転する
+fn input_spans(value: &str, cursor: usize) -> Vec<Span<'static>> {
+    let chars: Vec<char> = value.chars().collect();
+    let before: String = chars.iter().take(cursor).collect();
+    let at = chars.get(cursor).map_or(" ".to_string(), char::to_string);
+    let after: String = chars.iter().skip(cursor + 1).collect();
+    vec![
+        Span::raw("["),
+        Span::raw(before),
+        Span::styled(at, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(after),
+        Span::raw("]"),
+    ]
+}
+
+/// 状態行。入力中に受け付けられない値になっていれば、その理由、直前の操作が受け付けられなかった理由、
+/// 検証の結果（エラーと警告の件数と、先頭の 1 件）の順に出す
+fn status_line(app: &App) -> Line<'static> {
+    let red = Style::default().fg(Color::Red);
+    if let Some(Err(err)) = app.input_preview() {
+        return Line::from(Span::styled(
+            format!("入力は受け付けられません: {err}"),
+            red,
+        ));
+    }
+    if let Some(message) = &app.message {
+        return Line::from(Span::styled(format!("受け付けられません: {message}"), red));
+    }
+    let issues = app.draft.issues();
+    if issues.is_empty() {
+        return Line::from(Span::styled(
+            "検証: 問題なし",
+            Style::default().fg(Color::Green),
+        ));
+    }
+    let errors = issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .count();
+    let warnings = issues.len() - errors;
+    let first = issues
+        .iter()
+        .find(|issue| issue.severity == Severity::Error)
+        .unwrap_or(&issues[0]);
+    let location = if first.path.is_empty() {
+        String::new()
+    } else {
+        format!("{}: ", first.path)
+    };
+    let style = if errors > 0 {
+        red
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    Line::from(Span::styled(
+        format!(
+            "検証: エラー {errors} 件 / 警告 {warnings} 件 — {location}{}",
+            first.message
+        ),
+        style,
+    ))
 }
 
 /// 部品一覧。項目名に続けて、選択中のシナリオでの表示例を、生の ANSI で出す。
@@ -329,15 +499,15 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
     use super::*;
-    use crate::editor::layout::Layout as FormatLayout;
+    use crate::editor::draft::Draft;
     use crate::engine::config::DEFAULT_FORMAT;
 
     fn new_app() -> App {
-        App::new(FormatLayout::parse(DEFAULT_FORMAT))
+        App::new(Draft::with_format(DEFAULT_FORMAT))
     }
 
     fn app_with_focus(format: &str, focus: Focus) -> App {
-        let mut app = App::new(FormatLayout::parse(format));
+        let mut app = App::new(Draft::with_format(format));
         app.focus = focus;
         app
     }
@@ -365,9 +535,7 @@ mod tests {
     }
 
     fn render(app: &App, width: u16, height: u16) -> (Vec<String>, Vec<RawOverlay>) {
-        let config = Config::default();
         let ctx = ViewContext {
-            config: &config,
             source_label: "（テスト）",
         };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -390,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_draw_shows_header_layout_parts_and_footer() {
-        let (screen, overlays) = render(&new_app(), 100, 24);
+        let (screen, overlays) = render(&new_app(), 100, 40);
         let text = screen.join("\n");
         for expected in [
             "配置の編集（まだ保存できません）",
@@ -487,7 +655,7 @@ mod tests {
             (100, 24),
         ];
         for (width, height) in sizes {
-            for focus in [Focus::Layout, Focus::Parts, Focus::Preview] {
+            for focus in [Focus::Layout, Focus::Parts, Focus::Props, Focus::Preview] {
                 for steps in 0..8 {
                     let mut app = app_with_focus(DEFAULT_FORMAT, focus);
                     for _ in 0..steps * 3 {
@@ -576,10 +744,9 @@ mod tests {
         let mut config = Config::default();
         config.directory.format = "A\nB".to_string();
         let ctx = ViewContext {
-            config: &config,
             source_label: "（テスト）",
         };
-        let app = new_app();
+        let app = App::new(Draft::new(config, toml_edit::DocumentMut::new()));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut overlays = Vec::new();
         terminal
@@ -600,7 +767,7 @@ mod tests {
     fn test_draw_survives_tiny_terminals() {
         // 極端に小さい端末でも panic しない
         for (width, height) in [(1, 1), (10, 5), (20, 8), (40, 12)] {
-            for focus in [Focus::Layout, Focus::Parts, Focus::Preview] {
+            for focus in [Focus::Layout, Focus::Parts, Focus::Props, Focus::Preview] {
                 for scenario_steps in 0..8 {
                     let mut app = app_with_focus(DEFAULT_FORMAT, Focus::Preview);
                     for _ in 0..scenario_steps {
@@ -634,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_draw_preview_follows_the_edited_layout() {
-        let mut app = App::new(FormatLayout::parse("$model $quota"));
+        let mut app = App::new(Draft::with_format("$model $quota"));
         let (_, overlays) = render(&app, 100, 24);
         assert!(overlay_text(&overlays[..1]).contains("Claude Opus"));
 
@@ -670,7 +837,7 @@ mod tests {
             "クォータが見える"
         );
         // 確定するまで、配置は変わらない
-        assert_eq!(app.editor.layout().to_format(), "$directory");
+        assert_eq!(app.draft.layout().layout().to_format(), "$directory");
 
         // 確定すると、フォーカスを移しても残る
         press(&mut app, KeyCode::Enter);
@@ -691,5 +858,168 @@ mod tests {
         let text = screen.join("\n");
         assert!(text.contains("> 改行"), "{text}");
         assert!(!text.contains("> directory"), "{text}");
+    }
+
+    /// 配置の先頭が `format` のアプリで、プロパティ欄にフォーカスを移す
+    fn props_app(format: &str) -> App {
+        let mut app = App::new(Draft::with_format(format));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Props);
+        app
+    }
+
+    fn text(app: &App, width: u16, height: u16) -> String {
+        render(app, width, height).0.join("\n")
+    }
+
+    #[test]
+    fn test_props_pane_lists_keys_values_and_defaults() {
+        let mut app = props_app("$directory $context");
+        let shown = text(&app, 110, 40);
+        for expected in [
+            "プロパティ: directory",
+            "truncation_mode",
+            "[left|middle]", // 選択肢
+            "\"middle\"",
+            "検証: 問題なし",
+        ] {
+            assert!(shown.contains(expected), "{expected} がない\n{shown}");
+        }
+        assert!(
+            !shown.contains("（既定:"),
+            "既定値のままなら、既定値は添えない\n{shown}"
+        );
+
+        // 選択を `$context` へ移し、閾値を変えると、既定値が添えられる
+        app.focus = Focus::Layout;
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Right);
+        }
+        app.focus = Focus::Props;
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Right);
+        let shown = text(&app, 110, 40);
+        assert!(shown.contains("プロパティ: context"), "{shown}");
+        assert!(shown.contains("threshold_warning"), "{shown}");
+        assert!(shown.contains("51  （既定: 50）"), "{shown}");
+        assert!(shown.contains("Enter/Space: 切替・入力"), "{shown}");
+    }
+
+    #[test]
+    fn test_props_pane_without_a_target_part_shows_guidance() {
+        let mut app = App::new(Draft::with_format("$directory |"));
+        press(&mut app, KeyCode::Right); // 固定テキスト
+        let shown = text(&app, 110, 40);
+        assert!(
+            shown.contains("部品を選ぶと、その部品のプロパティを編集できます"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_props_pane_follows_the_parts_list_selection() {
+        let mut app = App::new(Draft::with_format("$directory"));
+        press(&mut app, KeyCode::BackTab); // プレビュー
+        press(&mut app, KeyCode::BackTab); // 部品一覧
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down); // model
+        }
+        press(&mut app, KeyCode::BackTab); // 部品一覧から入るプロパティ欄は、一覧の項目の部品
+        assert_eq!(app.focus, Focus::Props);
+        let shown = text(&app, 110, 40);
+        assert!(shown.contains("プロパティ: model"), "{shown}");
+    }
+
+    #[test]
+    fn test_text_input_is_shown_and_previewed_live() {
+        let mut app = props_app("$git_branch");
+        press(&mut app, KeyCode::Down); // symbol
+        press(&mut app, KeyCode::Enter);
+        // 入力中の内容とカーソルが、その行に出る。案内も入力用になる
+        let shown = text(&app, 110, 40);
+        assert!(shown.contains("symbol"), "{shown}");
+        assert!(shown.contains("[🌿  ]"), "{shown}");
+        assert!(shown.contains("入力中  Enter: 確定"), "{shown}");
+
+        // 入力すると、確定前でも、プレビューに反映される。下書きは変わらない
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Char('Z'));
+        let (_, overlays) = render(&app, 110, 40);
+        let preview = overlay_text(&overlays[..1]);
+        assert!(preview.contains("Zmain"), "{preview}");
+        assert_eq!(app.draft.config().git_branch.symbol, "🌿 ");
+
+        // Esc で取り消すと、元に戻る
+        press(&mut app, KeyCode::Esc);
+        let (_, overlays) = render(&app, 110, 40);
+        assert!(overlay_text(&overlays[..1]).contains("🌿 main"));
+    }
+
+    #[test]
+    fn test_invalid_input_shows_the_reason_and_keeps_the_last_good_preview() {
+        let mut app = props_app("$git_branch");
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down); // style
+        }
+        press(&mut app, KeyCode::Enter);
+        for c in " nonexistent".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let (screen, overlays) = render(&app, 110, 40);
+        let shown = screen.join("\n");
+        assert!(shown.contains("入力は受け付けられません"), "{shown}");
+        assert!(shown.contains("nonexistent"), "{shown}");
+        // プレビューは、確定済みの設定のまま
+        assert!(overlay_text(&overlays[..1]).contains("main"));
+
+        // Enter で拒否されたときの理由
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some());
+        assert!(text(&app, 110, 40).contains("受け付けられません"));
+    }
+
+    #[test]
+    fn test_status_line_reports_existing_issues() {
+        let toml = "[nothing]\nx = 1\n\n[model]\nstyle = \"cyna\"\n";
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let app = App::new(Draft::new(config, toml.parse().unwrap()));
+        let shown = text(&app, 130, 40);
+        // エラーを先に出す
+        assert!(
+            shown.contains(
+                "検証: エラー 1 件 / 警告 1 件 — model.style: 認識できないスタイル名: cyna"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_status_line_reports_warnings_when_there_are_no_errors() {
+        let toml = "[nothing]\nx = 1\n";
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let app = App::new(Draft::new(config, toml.parse().unwrap()));
+        let shown = text(&app, 130, 40);
+        assert!(
+            shown.contains("検証: エラー 0 件 / 警告 1 件 — nothing: "),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_props_rows_are_capped_and_scroll_to_the_selection() {
+        // quota は 9 個のプロパティを持つ。上限の行数で、選択中の行が見えるようにずらす
+        let mut app = props_app("$quota");
+        for _ in 0..8 {
+            press(&mut app, KeyCode::Down);
+        }
+        let shown = text(&app, 110, 50);
+        assert!(shown.contains("> disabled"), "{shown}");
+        assert!(
+            !shown.contains("  format "),
+            "先頭の行は、上へずれて見えない\n{shown}"
+        );
     }
 }

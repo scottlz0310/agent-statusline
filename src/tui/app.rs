@@ -2,8 +2,12 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::editor::layout::Layout;
+use crate::editor::draft::{Draft, PropError};
+use crate::editor::layout::Token;
 use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
+use crate::editor::update::PropValue;
+use crate::engine::config::Config;
+use crate::engine::parts::{PartSpec, PropKind, find};
 use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
 use crate::tui::palette::{self, PaletteItem};
@@ -22,18 +26,24 @@ const WIDTHS: [WidthChoice; 4] = [
     WidthChoice::Columns(160),
 ];
 
-/// キー入力の宛先。`Tab` で、配置 → 部品一覧 → プレビューの順に切り替える
+/// 閾値の増減の幅。`Shift` を押しているときは、大きい方
+const THRESHOLD_STEP: i64 = 1;
+const THRESHOLD_BIG_STEP: i64 = 10;
+
+/// キー入力の宛先。`Tab` で、配置 → プロパティ → 部品一覧 → プレビューの順に切り替える
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Preview,
     Layout,
     Parts,
+    Props,
 }
 
 impl Focus {
     fn next(self) -> Self {
         match self {
-            Self::Layout => Self::Parts,
+            Self::Layout => Self::Props,
+            Self::Props => Self::Parts,
             Self::Parts => Self::Preview,
             Self::Preview => Self::Layout,
         }
@@ -42,8 +52,56 @@ impl Focus {
     fn previous(self) -> Self {
         match self {
             Self::Layout => Self::Preview,
-            Self::Parts => Self::Layout,
+            Self::Props => Self::Layout,
+            Self::Parts => Self::Props,
             Self::Preview => Self::Parts,
+        }
+    }
+}
+
+/// プロパティの文字列の入力。カーソルは、文字単位の位置（`0..=文字数`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInput {
+    pub part: &'static str,
+    pub key: &'static str,
+    chars: Vec<char>,
+    cursor: usize,
+}
+
+impl TextInput {
+    fn new(part: &'static str, key: &'static str, initial: &str) -> Self {
+        let chars: Vec<char> = initial.chars().collect();
+        Self {
+            part,
+            key,
+            cursor: chars.len(),
+            chars,
+        }
+    }
+
+    pub fn value(&self) -> String {
+        self.chars.iter().collect()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn insert(&mut self, c: char) {
+        self.chars.insert(self.cursor, c);
+        self.cursor += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.chars.remove(self.cursor);
+        }
+    }
+
+    fn delete(&mut self) {
+        if self.cursor < self.chars.len() {
+            self.chars.remove(self.cursor);
         }
     }
 }
@@ -51,9 +109,16 @@ impl Focus {
 #[derive(Debug)]
 pub struct App {
     pub focus: Focus,
-    pub editor: LayoutEditor,
+    pub draft: Draft,
     pub palette: Vec<PaletteItem>,
     palette_index: usize,
+    props_index: usize,
+    /// プロパティ欄の対象を、配置と部品一覧のどちらから決めるか。配置から `Tab` で入れば配置、
+    /// 部品一覧から `BackTab` で入れば部品一覧
+    props_from: Focus,
+    pub input: Option<TextInput>,
+    /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
+    pub message: Option<String>,
     scenario_index: usize,
     width_index: usize,
     pub overflow: Overflow,
@@ -61,12 +126,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(layout: Layout) -> Self {
+    pub fn new(draft: Draft) -> Self {
         Self {
             focus: Focus::Layout,
-            editor: LayoutEditor::new(layout),
+            draft,
             palette: palette::items(),
             palette_index: 0,
+            props_index: 0,
+            props_from: Focus::Layout,
+            input: None,
+            message: None,
             scenario_index: 0,
             width_index: 0,
             overflow: Overflow::Truncate,
@@ -82,15 +151,46 @@ impl App {
         self.palette[self.palette_index]
     }
 
-    /// 部品一覧にフォーカスがあるとき、選択中の項目を、配置のカーソルの後ろに仮に入れた状態。
-    /// 確定（`Enter`）するまで、`editor` は変わらない
+    /// 部品一覧にフォーカスがあるとき、選択中の項目を配置のカーソルの後ろに仮に入れた状態。
+    /// 確定（`Enter`）するまで、下書きは変わらない
     pub fn tentative_editor(&self) -> Option<LayoutEditor> {
         if self.focus != Focus::Parts {
             return None;
         }
-        let mut editor = self.editor.without_history();
+        let mut editor = self.draft.layout().without_history();
         palette::apply(self.selected_item(), &mut editor, Placement::After);
         Some(editor)
+    }
+
+    /// プロパティ欄が対象にする部品。部品一覧から入ったときは、一覧の選択項目、
+    /// そうでなければ、配置のカーソルの部品。部品でなければ `None`
+    pub fn target_part(&self) -> Option<&'static PartSpec> {
+        let from_parts = self.focus == Focus::Parts
+            || (self.focus == Focus::Props && self.props_from == Focus::Parts);
+        if from_parts {
+            match self.selected_item() {
+                PaletteItem::Part(id) => find(id),
+                _ => None,
+            }
+        } else {
+            match self.draft.layout().selected() {
+                Some(Token::Part(id)) => find(id),
+                _ => None,
+            }
+        }
+    }
+
+    /// プロパティ欄で選択中の行（対象の部品のプロパティ数に収める）
+    pub fn props_index(&self) -> usize {
+        let count = self.target_part().map_or(0, |part| part.props.len());
+        self.props_index.min(count.saturating_sub(1))
+    }
+
+    /// 文字列を入力中のとき、確定したと仮定した設定。入力中のプレビューに使う（下書きは変えない）
+    pub fn input_preview(&self) -> Option<Result<Config, PropError>> {
+        let input = self.input.as_ref()?;
+        let value = PropValue::Str(input.value());
+        Some(self.draft.preview_prop(input.part, input.key, &value))
     }
 
     pub fn scenario(&self) -> Scenario {
@@ -109,16 +209,33 @@ impl App {
         }
     }
 
+    fn set_focus(&mut self, focus: Focus) {
+        if matches!(focus, Focus::Layout | Focus::Parts) {
+            self.props_from = focus;
+        }
+        if focus == Focus::Props {
+            self.props_index = 0;
+        }
+        self.focus = focus;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.message = None;
+        // 文字列の入力中は、`q` や `u` も含め、すべてのキーが入力へ行く
+        if self.input.is_some() {
+            self.handle_input_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Tab => self.focus = self.focus.next(),
-            KeyCode::BackTab => self.focus = self.focus.previous(),
-            KeyCode::Char('u') => self.editor.undo(),
+            KeyCode::Tab => self.set_focus(self.focus.next()),
+            KeyCode::BackTab => self.set_focus(self.focus.previous()),
+            KeyCode::Char('u') => self.draft.undo(),
             code => match self.focus {
                 Focus::Preview => self.handle_preview_key(code),
                 Focus::Layout => self.handle_layout_key(code, key.modifiers),
                 Focus::Parts => self.handle_parts_key(code),
+                Focus::Props => self.handle_props_key(code, key.modifiers),
             },
         }
     }
@@ -143,23 +260,6 @@ impl App {
         }
     }
 
-    /// `Enter` は選択中のトークンの後ろへ、`i` は前へ追加する
-    fn handle_parts_key(&mut self, key: KeyCode) {
-        match key {
-            KeyCode::Up => self.palette_index = self.palette_index.saturating_sub(1),
-            KeyCode::Down => {
-                self.palette_index = (self.palette_index + 1).min(self.palette.len() - 1);
-            }
-            KeyCode::Enter => {
-                palette::apply(self.selected_item(), &mut self.editor, Placement::After);
-            }
-            KeyCode::Char('i') => {
-                palette::apply(self.selected_item(), &mut self.editor, Placement::Before);
-            }
-            _ => {}
-        }
-    }
-
     /// 矢印は選択の移動、`Shift` を足すとトークンの移動
     fn handle_layout_key(&mut self, key: KeyCode, modifiers: KeyModifiers) {
         let direction = match key {
@@ -171,29 +271,152 @@ impl App {
         };
         if let Some(direction) = direction {
             if modifiers.contains(KeyModifiers::SHIFT) {
-                self.editor.move_selected(direction);
+                self.draft.edit_layout(|e| e.move_selected(direction));
             } else {
-                self.editor.select(direction);
+                self.draft.edit_layout(|e| e.select(direction));
             }
             return;
         }
         match key {
-            KeyCode::Char('d') | KeyCode::Delete => self.editor.delete_selected(),
-            KeyCode::Char('n') => self.editor.break_line_before(),
-            KeyCode::Char('a') => self.editor.add_line(),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.draft.edit_layout(LayoutEditor::delete_selected);
+            }
+            KeyCode::Char('n') => self.draft.edit_layout(LayoutEditor::break_line_before),
+            KeyCode::Char('a') => self.draft.edit_layout(LayoutEditor::add_line),
             _ => {}
         }
+    }
+
+    /// `Enter` は選択中のトークンの後ろへ、`i` は前へ追加する
+    fn handle_parts_key(&mut self, key: KeyCode) {
+        let item = self.selected_item();
+        match key {
+            KeyCode::Up => self.palette_index = self.palette_index.saturating_sub(1),
+            KeyCode::Down => {
+                self.palette_index = (self.palette_index + 1).min(self.palette.len() - 1);
+            }
+            KeyCode::Enter => {
+                self.draft
+                    .edit_layout(|e| palette::apply(item, e, Placement::After));
+            }
+            KeyCode::Char('i') => {
+                self.draft
+                    .edit_layout(|e| palette::apply(item, e, Placement::Before));
+            }
+            _ => {}
+        }
+    }
+
+    /// 行の選択（`↑↓`）と、値の変更。値の変え方は、プロパティの種類で決まる
+    fn handle_props_key(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        let Some(part) = self.target_part() else {
+            return;
+        };
+        let selected = self.props_index();
+        match key {
+            KeyCode::Up => {
+                self.props_index = selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.props_index = (selected + 1).min(part.props.len() - 1);
+                return;
+            }
+            _ => {}
+        }
+        let prop = &part.props[selected];
+        let Some(current) = self.draft.prop_value(part.id, prop.key) else {
+            return;
+        };
+        let new_value = match (&prop.kind, current) {
+            (PropKind::Bool, PropValue::Bool(on)) => {
+                matches!(key, KeyCode::Enter | KeyCode::Char(' ')).then_some(PropValue::Bool(!on))
+            }
+            (PropKind::Choice(choices), PropValue::Str(value)) => {
+                cycle_choice(choices, &value, key).map(PropValue::from)
+            }
+            (PropKind::Threshold, PropValue::Int(value)) => {
+                let step = if modifiers.contains(KeyModifiers::SHIFT) {
+                    THRESHOLD_BIG_STEP
+                } else {
+                    THRESHOLD_STEP
+                };
+                match key {
+                    KeyCode::Left => Some(PropValue::Int((value - step).max(0))),
+                    KeyCode::Right => Some(PropValue::Int((value + step).min(100))),
+                    _ => None,
+                }
+            }
+            (_, PropValue::Str(value)) if key == KeyCode::Enter => {
+                self.input = Some(TextInput::new(part.id, prop.key, &value));
+                None
+            }
+            _ => None,
+        };
+        if let Some(value) = new_value
+            && let Err(err) = self.draft.set_prop(part.id, prop.key, &value)
+        {
+            self.message = Some(err.to_string());
+        }
+    }
+
+    fn handle_input_key(&mut self, key: KeyEvent) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.input = None,
+            KeyCode::Enter => {
+                let value = PropValue::Str(input.value());
+                // 受け付けられないときは、入力を続けて、理由を示す
+                match self.draft.set_prop(input.part, input.key, &value) {
+                    Ok(()) => self.input = None,
+                    Err(err) => self.message = Some(err.to_string()),
+                }
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                input.insert(c);
+            }
+            KeyCode::Backspace => input.backspace(),
+            KeyCode::Delete => input.delete(),
+            KeyCode::Left => input.cursor = input.cursor.saturating_sub(1),
+            KeyCode::Right => input.cursor = (input.cursor + 1).min(input.chars.len()),
+            KeyCode::Home => input.cursor = 0,
+            KeyCode::End => input.cursor = input.chars.len(),
+            _ => {}
+        }
+    }
+}
+
+/// 選択肢の巡回。`Enter` / `→` は次、`←` は前。現在の値が選択肢にないときは、`Enter` / `→` で先頭、
+/// `←` で末尾にする
+fn cycle_choice(
+    choices: &'static [&'static str],
+    current: &str,
+    key: KeyCode,
+) -> Option<&'static str> {
+    let position = choices.iter().position(|choice| *choice == current);
+    let len = choices.len();
+    match (key, position) {
+        (KeyCode::Enter | KeyCode::Right, Some(i)) => Some(choices[(i + 1) % len]),
+        (KeyCode::Enter | KeyCode::Right, None) => choices.first().copied(),
+        (KeyCode::Left, Some(i)) => Some(choices[(i + len - 1) % len]),
+        (KeyCode::Left, None) => choices.last().copied(),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::layout::Token;
     use crate::editor::layout_edit::Cursor;
 
     fn app(format: &str) -> App {
-        App::new(Layout::parse(format))
+        App::new(Draft::with_format(format))
     }
 
     fn app_with_focus(format: &str, focus: Focus) -> App {
@@ -210,6 +433,16 @@ mod tests {
         app.handle_key(KeyEvent::new(code, KeyModifiers::SHIFT));
     }
 
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn format(app: &App) -> String {
+        app.draft.layout().layout().to_format()
+    }
+
     #[test]
     fn test_starts_on_layout() {
         assert_eq!(app("$model").focus, Focus::Layout);
@@ -220,16 +453,16 @@ mod tests {
         let mut app = app("$directory $model");
         // 配置にフォーカスがあるとき、矢印は選択を動かし、シナリオは変わらない
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.editor.cursor(), Cursor { line: 0, index: 1 });
+        assert_eq!(app.draft.layout().cursor(), Cursor { line: 0, index: 1 });
         assert_eq!(app.scenario(), Scenario::ALL[0]);
 
-        // Tab: 配置 → 部品一覧 → プレビュー → 配置
-        for expected in [Focus::Parts, Focus::Preview, Focus::Layout] {
+        // Tab: 配置 → プロパティ → 部品一覧 → プレビュー → 配置
+        for expected in [Focus::Props, Focus::Parts, Focus::Preview, Focus::Layout] {
             press(&mut app, KeyCode::Tab);
             assert_eq!(app.focus, expected);
         }
         // BackTab は逆順
-        for expected in [Focus::Preview, Focus::Parts, Focus::Layout] {
+        for expected in [Focus::Preview, Focus::Parts, Focus::Props, Focus::Layout] {
             press(&mut app, KeyCode::BackTab);
             assert_eq!(app.focus, expected);
         }
@@ -239,7 +472,7 @@ mod tests {
         press(&mut app, KeyCode::Right);
         assert_eq!(app.scenario(), Scenario::ALL[1]);
         press(&mut app, KeyCode::Left);
-        assert_eq!(app.editor.cursor(), Cursor { line: 0, index: 1 });
+        assert_eq!(app.draft.layout().cursor(), Cursor { line: 0, index: 1 });
     }
 
     #[test]
@@ -296,17 +529,13 @@ mod tests {
 
     #[test]
     fn test_layout_keys_do_nothing_on_other_focus() {
-        for focus in [Focus::Preview, Focus::Parts] {
+        for focus in [Focus::Preview, Focus::Parts, Focus::Props] {
             let mut app = app_with_focus("$directory $model", focus);
             for key in [KeyCode::Char('d'), KeyCode::Char('n'), KeyCode::Char('a')] {
                 press(&mut app, key);
             }
-            assert_eq!(
-                app.editor.layout().to_format(),
-                "$directory $model",
-                "{focus:?}"
-            );
-            assert!(!app.editor.can_undo(), "{focus:?}");
+            assert_eq!(format(&app), "$directory $model", "{focus:?}");
+            assert!(!app.draft.can_undo(), "{focus:?}");
         }
     }
 
@@ -334,23 +563,19 @@ mod tests {
         let mut app = app_with_focus("$directory", Focus::Parts);
         select_item(&mut app, PaletteItem::Part("quota"));
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.editor.layout().to_format(), "$directory$quota");
+        assert_eq!(format(&app), "$directory$quota");
         // 追加したトークンが選ばれるので、続けて Enter を押すと、その後ろへ足される
         select_item(&mut app, PaletteItem::Literal(" | "));
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.editor.layout().to_format(), "$directory$quota | ");
+        assert_eq!(format(&app), "$directory$quota | ");
         // `i` は、選択中のトークンの前
         select_item(&mut app, PaletteItem::LineBreak);
         press(&mut app, KeyCode::Char('i'));
-        assert_eq!(
-            app.editor.layout().to_format(),
-            "$directory$quota
- | "
-        );
+        assert_eq!(format(&app), "$directory$quota\n | ");
         // 元に戻す（フォーカスによらない）
         for expected in ["$directory$quota | ", "$directory$quota", "$directory"] {
             press(&mut app, KeyCode::Char('u'));
-            assert_eq!(app.editor.layout().to_format(), expected);
+            assert_eq!(format(&app), expected);
         }
     }
 
@@ -371,8 +596,8 @@ mod tests {
             Some(&Token::Part("model".to_string()))
         );
         // 確定するまで、設定の配置も履歴も変わらない
-        assert_eq!(app.editor.layout().to_format(), "$directory");
-        assert!(!app.editor.can_undo());
+        assert_eq!(format(&app), "$directory");
+        assert!(!app.draft.can_undo());
 
         // カーソルを動かすと、仮挿入も追従する
         press(&mut app, KeyCode::Up);
@@ -387,23 +612,23 @@ mod tests {
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Right);
         press_shift(&mut app, KeyCode::Left);
-        assert_eq!(app.editor.layout().to_format(), "$directory$model \n$quota");
+        assert_eq!(format(&app), "$directory$model \n$quota");
         // Shift+下で、隣の行へ移す
         press_shift(&mut app, KeyCode::Down);
-        assert_eq!(app.editor.layout().to_format(), "$directory \n$quota$model");
+        assert_eq!(format(&app), "$directory \n$quota$model");
         // 削除
         press(&mut app, KeyCode::Char('d'));
-        assert_eq!(app.editor.layout().to_format(), "$directory \n$quota");
+        assert_eq!(format(&app), "$directory \n$quota");
         // 改行を挿入・行を追加
         press(&mut app, KeyCode::Char('n'));
-        assert_eq!(app.editor.layout().to_format(), "$directory \n\n$quota");
+        assert_eq!(format(&app), "$directory \n\n$quota");
         press(&mut app, KeyCode::Char('a'));
-        assert_eq!(app.editor.layout().to_format(), "$directory \n\n$quota\n");
+        assert_eq!(format(&app), "$directory \n\n$quota\n");
         // 元に戻す（フォーカスによらない）
         press(&mut app, KeyCode::Tab);
         for expected in ["$directory \n\n$quota", "$directory \n$quota"] {
             press(&mut app, KeyCode::Char('u'));
-            assert_eq!(app.editor.layout().to_format(), expected);
+            assert_eq!(format(&app), expected);
         }
     }
 
@@ -412,13 +637,336 @@ mod tests {
         let mut unassigned = app("$model");
         press(&mut unassigned, KeyCode::Char('x'));
         assert!(!unassigned.should_quit, "未割り当てのキーは何もしない");
-        assert!(!unassigned.editor.can_undo());
+        assert!(!unassigned.draft.can_undo());
         for key in [KeyCode::Char('q'), KeyCode::Esc] {
-            for focus in [Focus::Preview, Focus::Layout, Focus::Parts] {
+            for focus in [Focus::Preview, Focus::Layout, Focus::Parts, Focus::Props] {
                 let mut app = app_with_focus("$model", focus);
                 press(&mut app, key);
                 assert!(app.should_quit, "{key:?}/{focus:?}");
             }
         }
+    }
+
+    // ---- プロパティ欄 ----
+
+    /// 配置の先頭が `part` のアプリで、プロパティ欄にフォーカスを移す
+    fn props_app(part: &str) -> App {
+        let mut app = app(&format!("${part}"));
+        press(&mut app, KeyCode::Tab); // プロパティ（配置のカーソルの部品）
+        assert_eq!(app.focus, Focus::Props);
+        app
+    }
+
+    /// 対象の部品のプロパティ欄で、`key` の行まで `Down` で進める
+    fn select_prop(app: &mut App, key: &str) {
+        let part = app.target_part().expect("対象の部品がある");
+        let index = part.props.iter().position(|p| p.key == key).unwrap();
+        for _ in 0..index {
+            press(app, KeyCode::Down);
+        }
+        assert_eq!(part.props[app.props_index()].key, key);
+    }
+
+    #[test]
+    fn test_target_part_follows_layout_cursor_or_palette_item() {
+        let mut app = app("$directory $model\n$quota");
+        assert_eq!(app.target_part().map(|p| p.id), Some("directory"));
+        press(&mut app, KeyCode::Right); // 固定テキスト
+        assert!(app.target_part().is_none());
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.target_part().map(|p| p.id), Some("model"));
+
+        // 配置から Tab で入ったプロパティ欄は、配置のカーソルの部品
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Props);
+        assert_eq!(app.target_part().map(|p| p.id), Some("model"));
+        // 部品一覧にフォーカスがあるときは、一覧の項目（部品）。固定テキストや改行は対象なし
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Parts);
+        assert_eq!(app.target_part().map(|p| p.id), Some("directory"));
+        select_item(&mut app, PaletteItem::Part("quota"));
+        assert_eq!(app.target_part().map(|p| p.id), Some("quota"));
+        select_item(&mut app, PaletteItem::LineBreak);
+        assert!(app.target_part().is_none());
+        // 一覧から BackTab で入ったプロパティ欄は、一覧の項目のまま
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus, Focus::Props);
+        assert!(app.target_part().is_none(), "改行の項目のまま");
+        // 配置に戻ると、配置のカーソルの部品
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus, Focus::Layout);
+        assert_eq!(app.target_part().map(|p| p.id), Some("model"));
+    }
+
+    #[test]
+    fn test_props_navigation_clamps() {
+        let mut app = props_app("git_branch");
+        let count = app.target_part().unwrap().props.len();
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.props_index(), 0);
+        for _ in 0..count + 3 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.props_index(), count - 1);
+        // 部品でないトークンでは、何も起きない
+        let mut empty = app_with_focus(" ", Focus::Props);
+        press(&mut empty, KeyCode::Down);
+        press(&mut empty, KeyCode::Enter);
+        assert!(empty.input.is_none());
+        assert!(!empty.draft.can_undo());
+    }
+
+    #[test]
+    fn test_bool_toggle() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "disabled");
+        for key in [KeyCode::Enter, KeyCode::Char(' ')] {
+            let before = app.draft.prop_value("git_branch", "disabled");
+            press(&mut app, key);
+            assert_ne!(
+                app.draft.prop_value("git_branch", "disabled"),
+                before,
+                "{key:?}"
+            );
+        }
+        // 2 回反転して、元に戻っている。履歴には 2 件（元に戻せる）
+        assert_eq!(
+            app.draft.prop_value("git_branch", "disabled"),
+            Some(PropValue::Bool(false))
+        );
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(
+            app.draft.prop_value("git_branch", "disabled"),
+            Some(PropValue::Bool(true))
+        );
+        // 矢印では反転しない
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.draft.prop_value("git_branch", "disabled"),
+            Some(PropValue::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_choice_cycles() {
+        let mut app = props_app("directory");
+        select_prop(&mut app, "truncation_mode");
+        let mode = |app: &App| app.draft.prop_value("directory", "truncation_mode");
+        assert_eq!(mode(&app), Some(PropValue::from("middle")));
+        // (キー, 期待する値)
+        let steps = [
+            (KeyCode::Enter, "left"),
+            (KeyCode::Right, "middle"),
+            (KeyCode::Left, "left"),
+            (KeyCode::Left, "middle"),
+        ];
+        for (key, expected) in steps {
+            press(&mut app, key);
+            assert_eq!(mode(&app), Some(PropValue::from(expected)), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn test_cycle_choice_from_unknown_value() {
+        let choices: &'static [&'static str] = &["left", "middle"];
+        assert_eq!(cycle_choice(choices, "right", KeyCode::Enter), Some("left"));
+        assert_eq!(cycle_choice(choices, "right", KeyCode::Right), Some("left"));
+        assert_eq!(
+            cycle_choice(choices, "right", KeyCode::Left),
+            Some("middle")
+        );
+        assert_eq!(cycle_choice(choices, "left", KeyCode::Up), None);
+    }
+
+    #[test]
+    fn test_threshold_steps_and_rejections() {
+        let mut app = props_app("context");
+        select_prop(&mut app, "threshold_warning");
+        let warning = |app: &App| app.draft.prop_value("context", "threshold_warning");
+        assert_eq!(warning(&app), Some(PropValue::Int(50)));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(warning(&app), Some(PropValue::Int(51)));
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(warning(&app), Some(PropValue::Int(49)));
+        press_shift(&mut app, KeyCode::Left);
+        assert_eq!(warning(&app), Some(PropValue::Int(39)));
+        // 0 で止まる（負にならない）
+        for _ in 0..5 {
+            press_shift(&mut app, KeyCode::Left);
+        }
+        assert_eq!(warning(&app), Some(PropValue::Int(0)));
+        assert!(app.message.is_none());
+
+        // critical（80）以上にはできない: 受け付けず、理由を示す。値は変わらない
+        for _ in 0..8 {
+            press_shift(&mut app, KeyCode::Right);
+        }
+        assert_eq!(warning(&app), Some(PropValue::Int(70)));
+        press_shift(&mut app, KeyCode::Right);
+        assert_eq!(warning(&app), Some(PropValue::Int(70)));
+        let message = app.message.clone().expect("理由が示される");
+        assert!(message.contains("threshold_warning"), "{message}");
+        // 次のキー入力で、理由は消える
+        press(&mut app, KeyCode::Down);
+        assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn test_threshold_upper_bound() {
+        let mut app = props_app("context");
+        select_prop(&mut app, "threshold_critical");
+        for _ in 0..4 {
+            press_shift(&mut app, KeyCode::Right);
+        }
+        assert_eq!(
+            app.draft.prop_value("context", "threshold_critical"),
+            Some(PropValue::Int(100))
+        );
+    }
+
+    #[test]
+    fn test_text_input_commit_and_cancel() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        let input = app.input.as_ref().expect("入力が始まる");
+        assert_eq!(input.value(), "🌿 ");
+        assert_eq!(input.cursor(), 2);
+
+        // 入力中は、`q` や `u`、Tab も文字・何もしない（終了も元に戻すもしない）
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        type_text(&mut app, "qu");
+        press(&mut app, KeyCode::Tab);
+        assert!(!app.should_quit);
+        assert_eq!(app.focus, Focus::Props);
+        assert_eq!(app.input.as_ref().unwrap().value(), "qu");
+        // 確定前は、下書きも履歴も変わらない
+        assert_eq!(
+            app.draft.prop_value("git_branch", "symbol"),
+            Some(PropValue::from("🌿 "))
+        );
+        assert!(!app.draft.can_undo());
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none());
+        assert_eq!(
+            app.draft.prop_value("git_branch", "symbol"),
+            Some(PropValue::from("qu"))
+        );
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(
+            app.draft.prop_value("git_branch", "symbol"),
+            Some(PropValue::from("🌿 "))
+        );
+
+        // Esc で取り消すと、何も変わらない
+        press(&mut app, KeyCode::Enter);
+        type_text(&mut app, "xyz");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_none());
+        assert!(!app.should_quit, "Esc は入力の取り消しだけ");
+        assert_eq!(
+            app.draft.prop_value("git_branch", "symbol"),
+            Some(PropValue::from("🌿 "))
+        );
+        assert!(!app.draft.can_undo());
+    }
+
+    #[test]
+    fn test_text_input_editing_keys() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        app.input = Some(TextInput::new("git_branch", "symbol", "ab🌿c"));
+        // (名前, 操作, 期待する値, 期待するカーソル)
+        let cases: [(&str, KeyCode, &str, usize); 10] = [
+            ("home", KeyCode::Home, "ab🌿c", 0),
+            ("right", KeyCode::Right, "ab🌿c", 1),
+            ("insert-in-the-middle", KeyCode::Char('X'), "aXb🌿c", 2),
+            ("end", KeyCode::End, "aXb🌿c", 5),
+            ("left", KeyCode::Left, "aXb🌿c", 4),
+            (
+                "backspace-removes-a-whole-char",
+                KeyCode::Backspace,
+                "aXbc",
+                3,
+            ),
+            (
+                "delete-removes-the-char-at-cursor",
+                KeyCode::Delete,
+                "aXb",
+                3,
+            ),
+            ("delete-at-end-does-nothing", KeyCode::Delete, "aXb", 3),
+            ("home-again", KeyCode::Home, "aXb", 0),
+            (
+                "backspace-at-start-does-nothing",
+                KeyCode::Backspace,
+                "aXb",
+                0,
+            ),
+        ];
+        for (name, key, value, cursor) in cases {
+            press(&mut app, key);
+            let input = app.input.as_ref().unwrap();
+            assert_eq!(input.value(), value, "{name}");
+            assert_eq!(input.cursor(), cursor, "{name}");
+        }
+        press(&mut app, KeyCode::Delete);
+        assert_eq!(app.input.as_ref().unwrap().value(), "Xb");
+        // 文字の挿入は、Ctrl / Alt を伴うときは入らない
+        let before = app.input.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+        assert_eq!(app.input, before);
+    }
+
+    #[test]
+    fn test_text_input_rejected_value_keeps_the_input_open() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "style");
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "bold nonexistent");
+        // 入力中のプレビューは、エラーを返す
+        assert!(matches!(app.input_preview(), Some(Err(_))));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some(), "受け付けられないときは、入力を続ける");
+        let message = app.message.clone().expect("理由が示される");
+        assert!(message.contains("nonexistent"), "{message}");
+        assert!(!app.draft.can_undo());
+
+        // 直すと、確定できる。入力中のプレビューは、確定したと仮定した設定
+        for _ in 0.."nonexistent".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "cyan");
+        let preview = app.input_preview().unwrap().unwrap();
+        assert_eq!(preview.git_branch.style, "bold cyan");
+        assert_eq!(app.draft.config().git_branch.style, "green");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none());
+        assert_eq!(app.draft.config().git_branch.style, "bold cyan");
+    }
+
+    #[test]
+    fn test_props_edit_is_undone_in_order_with_layout_edits() {
+        let mut app = app("$directory");
+        // 配置の編集 → プロパティの編集 → 元に戻す 2 回
+        press(&mut app, KeyCode::Char('a'));
+        app.focus = Focus::Layout;
+        press(&mut app, KeyCode::Up);
+        app.focus = Focus::Props;
+        press(&mut app, KeyCode::Down);
+        select_prop(&mut app, "disabled");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('u'));
+        assert!(app.draft.layout().layout().to_format().ends_with('\n'));
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$directory");
     }
 }

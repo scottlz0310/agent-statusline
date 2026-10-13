@@ -16,6 +16,12 @@ pub enum PropValue {
     Bool(bool),
 }
 
+impl From<&str> for PropValue {
+    fn from(value: &str) -> Self {
+        Self::Str(value.to_string())
+    }
+}
+
 impl PropValue {
     pub fn from_item(item: &Item) -> Option<Self> {
         let value = item.as_value()?;
