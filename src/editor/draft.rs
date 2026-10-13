@@ -44,6 +44,13 @@ enum Edit {
     Prop(String),
 }
 
+/// 検証を通った変更の結果
+struct Candidate {
+    document: DocumentMut,
+    text: String,
+    config: Config,
+}
+
 #[derive(Debug)]
 pub struct Draft {
     document: DocumentMut,
@@ -82,6 +89,16 @@ impl Draft {
         &self.layout
     }
 
+    /// テスト用: `format` だけを指定した下書き（ほかは既定）
+    #[cfg(test)]
+    pub fn with_format(format: &str) -> Self {
+        let config = Config {
+            format: format.to_string(),
+            ..Config::default()
+        };
+        Self::new(config, DocumentMut::new())
+    }
+
     /// 配置を編集する。履歴に積まれた変更だけを、時系列の履歴へ記録する
     pub fn edit_layout(&mut self, edit: impl FnOnce(&mut LayoutEditor)) {
         let before = self.layout.undo_len();
@@ -96,12 +113,42 @@ impl Draft {
     /// （複数のエラーがあっても、1 つずつ直せる。エラーのキーを別の誤った値にする変更も受け付ける）。
     /// 警告は受け付ける。値が変わらないとき（既定値と同じでキーがない場合を含む）は、履歴に積まない
     pub fn set_prop(&mut self, part: &str, key: &str, value: &PropValue) -> Result<(), PropError> {
-        let mut candidate = self.document.clone();
-        set_prop(&mut candidate, &self.defaults, part, key, value).map_err(PropError::Update)?;
-        let text = candidate.to_string();
-        let previous = self.document.to_string();
-        if text == previous {
+        let Some(candidate) = self.evaluate(part, key, value)? else {
             return Ok(());
+        };
+        self.history.push(Edit::Prop(self.document.to_string()));
+        self.effective = effective_document(&candidate.config);
+        self.config = candidate.config;
+        self.document_issues = document_issues(&candidate.text);
+        self.document = candidate.document;
+        Ok(())
+    }
+
+    /// `set_prop` した結果の設定。確定せず、下書きは変えない（入力中のプレビュー用）。
+    /// 値が変わらないときは、現在の設定を返す
+    pub fn preview_prop(
+        &self,
+        part: &str,
+        key: &str,
+        value: &PropValue,
+    ) -> Result<Config, PropError> {
+        Ok(self
+            .evaluate(part, key, value)?
+            .map_or_else(|| self.config.clone(), |candidate| candidate.config))
+    }
+
+    /// 変更を、候補の文書へ当てて検証する。変わらなければ `None`。新しいエラーなら `Err`
+    fn evaluate(
+        &self,
+        part: &str,
+        key: &str,
+        value: &PropValue,
+    ) -> Result<Option<Candidate>, PropError> {
+        let mut document = self.document.clone();
+        set_prop(&mut document, &self.defaults, part, key, value).map_err(PropError::Update)?;
+        let text = document.to_string();
+        if text == self.document.to_string() {
+            return Ok(None);
         }
 
         let report = validate(&text);
@@ -120,13 +167,11 @@ impl Draft {
         let Some(config) = report.config else {
             unreachable!("新しいエラーがなければ、設定として読めている")
         };
-
-        self.history.push(Edit::Prop(previous));
-        self.effective = effective_document(&config);
-        self.config = config;
-        self.document = candidate;
-        self.document_issues = document_issues(&text);
-        Ok(())
+        Ok(Some(Candidate {
+            document,
+            text,
+            config,
+        }))
     }
 
     /// プロパティの現在の値。部品かキーが未知なら `None`
@@ -356,6 +401,30 @@ style = \"cyna\"
         draft.set_prop("model", "style", &string("cynaa")).unwrap();
         assert!(draft.has_errors());
         assert_eq!(draft.config().model.style, "cynaa");
+    }
+
+    #[test]
+    fn test_preview_prop_does_not_change_the_draft() {
+        let draft = draft("");
+        let before = draft.to_toml();
+        let config = draft
+            .preview_prop("git_branch", "symbol", &string("B "))
+            .unwrap();
+        assert_eq!(config.git_branch.symbol, "B ");
+        assert_eq!(draft.config().git_branch.symbol, "🌿 ");
+        assert_eq!(draft.to_toml(), before);
+        assert!(!draft.can_undo());
+
+        // エラーの値は Err。値が変わらないときは、現在の設定
+        assert!(
+            draft
+                .preview_prop("git_branch", "style", &string("nonexistent"))
+                .is_err()
+        );
+        let unchanged = draft
+            .preview_prop("git_branch", "symbol", &string("🌿 "))
+            .unwrap();
+        assert_eq!(unchanged.git_branch.symbol, "🌿 ");
     }
 
     #[test]
