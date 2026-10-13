@@ -1,16 +1,21 @@
 //! 設定 TUI の状態と、キー入力による状態遷移（画面に依存しない）。
 
+use std::path::{Path, PathBuf};
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::editor::draft::{Draft, PropError};
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
+use crate::editor::load::ConfigSource;
+use crate::editor::save::{ConflictKind, SaveError};
 use crate::editor::update::PropValue;
 use crate::engine::config::Config;
 use crate::engine::parts::{PartSpec, PropKind, find};
 use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
 use crate::tui::palette::{self, PaletteItem};
+use crate::tui::storage::Storage;
 
 /// プレビューの幅の選択。`Auto` は実端末の幅
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,24 +64,38 @@ impl Focus {
     }
 }
 
-/// プロパティの文字列の入力。カーソルは、文字単位の位置（`0..=文字数`）
+/// 文字列の入力の対象
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputTarget {
+    /// 部品のプロパティの値
+    Prop {
+        part: &'static str,
+        key: &'static str,
+    },
+    /// 別名で保存するパス
+    SavePath,
+}
+
+/// 文字列の入力。カーソルは、文字単位の位置（`0..=文字数`）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextInput {
-    pub part: &'static str,
-    pub key: &'static str,
+    pub target: InputTarget,
     chars: Vec<char>,
     cursor: usize,
 }
 
 impl TextInput {
-    fn new(part: &'static str, key: &'static str, initial: &str) -> Self {
+    fn new(target: InputTarget, initial: &str) -> Self {
         let chars: Vec<char> = initial.chars().collect();
         Self {
-            part,
-            key,
+            target,
             cursor: chars.len(),
             chars,
         }
+    }
+
+    fn prop(part: &'static str, key: &'static str, initial: &str) -> Self {
+        Self::new(InputTarget::Prop { part, key }, initial)
     }
 
     pub fn value(&self) -> String {
@@ -106,7 +125,16 @@ impl TextInput {
     }
 }
 
-#[derive(Debug)]
+/// 画面の下に出す確認・選択の状態。`Normal` 以外のとき、キーはその選択に使われる
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    /// 未保存の変更があるまま終了しようとした
+    ConfirmQuit,
+    /// 保存しようとしたら、外部の変更と衝突した
+    Conflict(ConflictKind),
+}
+
 pub struct App {
     pub focus: Focus,
     pub draft: Draft,
@@ -119,17 +147,49 @@ pub struct App {
     pub input: Option<TextInput>,
     /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
     pub message: Option<String>,
+    /// 直前の操作の結果の知らせ（保存した、など。次のキー入力で消える）
+    pub notice: Option<String>,
+    pub mode: Mode,
+    storage: Box<dyn Storage>,
+    /// 編集中の設定の元になっているファイル（保存すると、保存先に更新される）
+    source: ConfigSource,
+    /// 最後に保存した（または読み込んだ）TOML。これと違えば、未保存の変更がある
+    saved_toml: String,
     scenario_index: usize,
     width_index: usize,
     pub overflow: Overflow,
     pub should_quit: bool,
 }
 
+#[cfg(test)]
 impl App {
-    pub fn new(draft: Draft) -> Self {
+    /// テスト用: 未作成の設定ファイル（`test.toml`）を、何も書かない `Storage` で編集する
+    pub fn for_test(draft: Draft) -> Self {
+        Self::with_storage_for_test(
+            draft,
+            Box::<crate::tui::storage::fake::FakeStorage>::default(),
+        )
+    }
+
+    pub fn with_storage_for_test(draft: Draft, storage: Box<dyn Storage>) -> Self {
+        let source = ConfigSource::Missing {
+            target: PathBuf::from("test.toml"),
+            from_link: false,
+        };
+        Self::new(draft, source, storage)
+    }
+}
+
+impl App {
+    pub fn new(draft: Draft, source: ConfigSource, storage: Box<dyn Storage>) -> Self {
         Self {
             focus: Focus::Layout,
+            saved_toml: draft.to_toml(),
             draft,
+            source,
+            storage,
+            notice: None,
+            mode: Mode::Normal,
             palette: palette::items(),
             palette_index: 0,
             props_index: 0,
@@ -186,11 +246,41 @@ impl App {
         self.props_index.min(count.saturating_sub(1))
     }
 
-    /// 文字列を入力中のとき、確定したと仮定した設定。入力中のプレビューに使う（下書きは変えない）
+    /// プロパティの文字列を入力中のとき、確定したと仮定した設定。入力中のプレビューに使う（下書きは変えない）
     pub fn input_preview(&self) -> Option<Result<Config, PropError>> {
         let input = self.input.as_ref()?;
+        let InputTarget::Prop { part, key } = input.target else {
+            return None;
+        };
         let value = PropValue::Str(input.value());
-        Some(self.draft.preview_prop(input.part, input.key, &value))
+        Some(self.draft.preview_prop(part, key, &value))
+    }
+
+    /// 未保存の変更があるか。元に戻して、最後に保存した内容と同じになれば、なくなる
+    pub fn is_dirty(&self) -> bool {
+        self.draft.to_toml() != self.saved_toml
+    }
+
+    /// 編集中の設定ファイルの説明（ヘッダーに出す）
+    pub fn source_label(&self) -> String {
+        match &self.source {
+            ConfigSource::Existing { path, .. } if path.requested == path.real => {
+                path.requested.display().to_string()
+            }
+            ConfigSource::Existing { path, .. } => {
+                format!("{} → {}", path.requested.display(), path.real.display())
+            }
+            ConfigSource::Missing { target, .. } => {
+                format!("未作成（保存すると作成されます: {}）", target.display())
+            }
+        }
+    }
+
+    fn source_path(&self) -> &Path {
+        match &self.source {
+            ConfigSource::Existing { path, .. } => &path.requested,
+            ConfigSource::Missing { target, .. } => target,
+        }
     }
 
     pub fn scenario(&self) -> Scenario {
@@ -221,13 +311,27 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.message = None;
+        self.notice = None;
         // 文字列の入力中は、`q` や `u` も含め、すべてのキーが入力へ行く
         if self.input.is_some() {
             self.handle_input_key(key);
             return;
         }
+        if self.mode != Mode::Normal {
+            self.handle_mode_key(key.code);
+            return;
+        }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if self.is_dirty() {
+                    self.mode = Mode::ConfirmQuit;
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('s') => {
+                self.save();
+            }
             KeyCode::Tab => self.set_focus(self.focus.next()),
             KeyCode::BackTab => self.set_focus(self.focus.previous()),
             KeyCode::Char('u') => self.draft.undo(),
@@ -237,6 +341,105 @@ impl App {
                 Focus::Parts => self.handle_parts_key(code),
                 Focus::Props => self.handle_props_key(code, key.modifiers),
             },
+        }
+    }
+
+    /// 確認・選択の状態のキー。選択肢以外のキーは、何もせずに戻る
+    fn handle_mode_key(&mut self, key: KeyCode) {
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        match (mode, key) {
+            (Mode::ConfirmQuit, KeyCode::Char('y')) => self.should_quit = true,
+            (Mode::ConfirmQuit, KeyCode::Char('s')) => {
+                // 保存できなければ、終了しない（競合なら、その選択へ進む）
+                if self.save() {
+                    self.should_quit = true;
+                }
+            }
+            (Mode::Conflict(_), KeyCode::Char('r')) => self.reload(),
+            (Mode::Conflict(_), KeyCode::Char('a')) => {
+                let default = format!("{}.new", self.source_path().display());
+                self.input = Some(TextInput::new(InputTarget::SavePath, &default));
+            }
+            _ => {}
+        }
+    }
+
+    /// 保存する。保存できたら `true`。エラーが残っているとき、変更がないときは、保存しない。
+    /// 外部の変更と衝突したときは、再読み込みか別名で保存かを選ぶ状態へ移る
+    fn save(&mut self) -> bool {
+        if let Some(issue) = self
+            .draft
+            .issues()
+            .into_iter()
+            .find(|issue| issue.severity == crate::editor::validate::Severity::Error)
+        {
+            self.message = Some(format!(
+                "エラーが残っているため保存できません: {}",
+                issue.message
+            ));
+            return false;
+        }
+        if !self.is_dirty() {
+            self.notice = Some("変更がないため、保存しませんでした".to_string());
+            return false;
+        }
+        let text = self.draft.to_toml();
+        match self.storage.save(&self.source, &text) {
+            Ok(source) => {
+                self.source = source;
+                self.saved_toml = text;
+                self.notice = Some(format!("保存しました: {}", self.source_path().display()));
+                true
+            }
+            Err(SaveError::Conflict(kind)) => {
+                self.mode = Mode::Conflict(kind);
+                false
+            }
+            Err(err) => {
+                self.message = Some(err.to_string());
+                false
+            }
+        }
+    }
+
+    /// 別のパスへ保存する。`true` なら保存できた
+    fn save_as(&mut self, path: &str) -> bool {
+        if path.is_empty() {
+            self.message = Some("保存するパスを入力してください".to_string());
+            return false;
+        }
+        let text = self.draft.to_toml();
+        match self.storage.save_as(&PathBuf::from(path), &text) {
+            Ok(source) => {
+                self.source = source;
+                self.saved_toml = text;
+                self.notice = Some(format!("保存しました: {}", self.source_path().display()));
+                true
+            }
+            Err(SaveError::Conflict(_)) => {
+                self.message = Some(format!("既にあるファイルは上書きしません: {path}"));
+                false
+            }
+            Err(err) => {
+                self.message = Some(err.to_string());
+                false
+            }
+        }
+    }
+
+    /// 設定ファイルを読み込み直す。**今の編集は破棄される**（競合の選択で、利用者が選んだとき）
+    fn reload(&mut self) {
+        // 未作成のときも、今の保存先を読む（起動時の指定へは戻らない）
+        let path = self.source_path().to_path_buf();
+        match self.storage.reload(&path) {
+            Ok(loaded) => {
+                self.draft = Draft::new(loaded.config, loaded.document);
+                self.source = loaded.source;
+                self.saved_toml = self.draft.to_toml();
+                self.notice =
+                    Some("再読み込みしました（それまでの編集は破棄しました）".to_string());
+            }
+            Err(err) => self.message = Some(err.to_string()),
         }
     }
 
@@ -348,7 +551,7 @@ impl App {
                 }
             }
             (_, PropValue::Str(value)) if key == KeyCode::Enter => {
-                self.input = Some(TextInput::new(part.id, prop.key, &value));
+                self.input = Some(TextInput::prop(part.id, prop.key, &value));
                 None
             }
             _ => None,
@@ -366,14 +569,22 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => self.input = None,
-            KeyCode::Enter => {
-                let value = PropValue::Str(input.value());
-                // 受け付けられないときは、入力を続けて、理由を示す
-                match self.draft.set_prop(input.part, input.key, &value) {
-                    Ok(()) => self.input = None,
-                    Err(err) => self.message = Some(err.to_string()),
+            KeyCode::Enter => match input.target {
+                InputTarget::Prop { part, key } => {
+                    let value = PropValue::Str(input.value());
+                    // 受け付けられないときは、入力を続けて、理由を示す
+                    match self.draft.set_prop(part, key, &value) {
+                        Ok(()) => self.input = None,
+                        Err(err) => self.message = Some(err.to_string()),
+                    }
                 }
-            }
+                InputTarget::SavePath => {
+                    let path = input.value();
+                    if self.save_as(path.trim()) {
+                        self.input = None;
+                    }
+                }
+            },
             KeyCode::Char(c)
                 if !key
                     .modifiers
@@ -416,7 +627,7 @@ mod tests {
     use crate::editor::layout_edit::Cursor;
 
     fn app(format: &str) -> App {
-        App::new(Draft::with_format(format))
+        App::for_test(Draft::with_format(format))
     }
 
     fn app_with_focus(format: &str, focus: Focus) -> App {
@@ -879,7 +1090,7 @@ mod tests {
         let mut app = props_app("git_branch");
         select_prop(&mut app, "symbol");
         press(&mut app, KeyCode::Enter);
-        app.input = Some(TextInput::new("git_branch", "symbol", "ab🌿c"));
+        app.input = Some(TextInput::prop("git_branch", "symbol", "ab🌿c"));
         // (名前, 操作, 期待する値, 期待するカーソル)
         let cases: [(&str, KeyCode, &str, usize); 10] = [
             ("home", KeyCode::Home, "ab🌿c", 0),
@@ -968,5 +1179,344 @@ mod tests {
         assert!(app.draft.layout().layout().to_format().ends_with('\n'));
         press(&mut app, KeyCode::Char('u'));
         assert_eq!(format(&app), "$directory");
+    }
+
+    // ---- 保存・未保存・競合 ----
+
+    use crate::editor::load::{ContentHash, LoadedConfig, ResolvedPath};
+    use crate::tui::storage::fake::FakeStorage;
+
+    fn app_with_storage(format: &str) -> (App, FakeStorage) {
+        let storage = FakeStorage::default();
+        let app = App::with_storage_for_test(Draft::with_format(format), Box::new(storage.clone()));
+        (app, storage)
+    }
+
+    /// 配置を 1 つ変えて、未保存の変更がある状態にする
+    fn make_dirty(app: &mut App) {
+        press(app, KeyCode::Char('a')); // 末尾に空の行を足す（配置にフォーカスがある）
+        assert!(app.is_dirty());
+    }
+
+    fn loaded(text: &str) -> LoadedConfig {
+        LoadedConfig {
+            config: toml_edit::de::from_str(text).unwrap(),
+            document: text.parse().unwrap(),
+            source: ConfigSource::Existing {
+                path: ResolvedPath {
+                    requested: PathBuf::from("reloaded.toml"),
+                    real: PathBuf::from("reloaded.toml"),
+                },
+                fingerprint: ContentHash::of(text.as_bytes()),
+            },
+        }
+    }
+
+    #[test]
+    fn test_dirty_follows_edits_and_undo() {
+        let (mut app, _) = app_with_storage("$model");
+        assert!(!app.is_dirty());
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('u'));
+        assert!(!app.is_dirty(), "元に戻すと、未保存の変更はなくなる");
+    }
+
+    #[test]
+    fn test_save_writes_the_toml_and_clears_dirty() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        let expected = app.draft.to_toml();
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(storage.0.borrow().saves, [expected]);
+        assert!(!app.is_dirty());
+        let notice = app.notice.clone().expect("保存した知らせ");
+        assert!(notice.contains("保存しました"), "{notice}");
+        assert!(notice.contains("test.toml"), "{notice}");
+        assert!(app.source_label().contains("test.toml"));
+        assert!(
+            !app.source_label().contains("未作成"),
+            "保存すると、既存のファイルになる"
+        );
+        // 次のキー入力で、知らせは消える
+        press(&mut app, KeyCode::Down);
+        assert!(app.notice.is_none());
+    }
+
+    #[test]
+    fn test_save_without_changes_does_nothing() {
+        let (mut app, storage) = app_with_storage("$model");
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(storage.0.borrow().saves.len(), 0);
+        assert!(app.notice.clone().unwrap().contains("変更がない"));
+    }
+
+    #[test]
+    fn test_save_is_refused_while_errors_remain() {
+        let toml = "[model]\nstyle = \"cyna\"\n";
+        let draft = Draft::new(
+            toml_edit::de::from_str(toml).unwrap(),
+            toml.parse().unwrap(),
+        );
+        let storage = FakeStorage::default();
+        let mut app = App::with_storage_for_test(draft, Box::new(storage.clone()));
+        press(&mut app, KeyCode::Char('a')); // 変更を作る
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(storage.0.borrow().saves.len(), 0, "保存しない");
+        let message = app.message.clone().expect("理由が示される");
+        assert!(message.contains("エラーが残っている"), "{message}");
+        assert!(message.contains("cyna"), "{message}");
+        assert!(app.is_dirty());
+    }
+
+    #[test]
+    fn test_save_error_is_shown_and_keeps_the_edit() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::NoHistoryDir);
+        press(&mut app, KeyCode::Char('s'));
+        assert!(app.message.clone().unwrap().contains("履歴の保存先"));
+        assert!(app.is_dirty());
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn test_s_is_a_character_while_typing() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.input.as_ref().unwrap().value(), "🌿 s");
+        assert!(!app.draft.can_undo(), "保存でも確定でもない");
+    }
+
+    #[test]
+    fn test_quit_when_clean_exits_immediately() {
+        for key in [KeyCode::Char('q'), KeyCode::Esc] {
+            let (mut app, _) = app_with_storage("$model");
+            press(&mut app, key);
+            assert!(app.should_quit, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn test_quit_when_dirty_asks_first() {
+        for key in [KeyCode::Char('q'), KeyCode::Esc] {
+            let (mut app, storage) = app_with_storage("$model");
+            make_dirty(&mut app);
+            press(&mut app, key);
+            assert!(!app.should_quit, "{key:?}");
+            assert_eq!(app.mode, Mode::ConfirmQuit, "{key:?}");
+
+            // 選択肢以外のキー（`q` を含む）は、何もせずに戻る
+            press(&mut app, KeyCode::Char('q'));
+            assert_eq!(app.mode, Mode::Normal);
+            assert!(!app.should_quit);
+            assert!(app.is_dirty());
+
+            // y: 保存せず終了
+            press(&mut app, key);
+            press(&mut app, KeyCode::Char('y'));
+            assert!(app.should_quit);
+            assert_eq!(storage.0.borrow().saves.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_quit_with_save() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('s'));
+        assert!(app.should_quit);
+        assert_eq!(storage.0.borrow().saves.len(), 1);
+    }
+
+    #[test]
+    fn test_quit_with_save_does_not_quit_when_saving_fails() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::NoHistoryDir);
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('s'));
+        assert!(!app.should_quit);
+        assert!(app.message.is_some());
+        assert_eq!(app.mode, Mode::Normal);
+
+        // 衝突したときは、その選択へ進む（終了しない）
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('s'));
+        assert!(!app.should_quit);
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Changed));
+    }
+
+    #[test]
+    fn test_conflict_cancel_keeps_the_edit() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Changed));
+        // 選択肢以外のキーは、何もせずに戻る
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(!app.should_quit);
+        assert!(app.is_dirty(), "編集は残る");
+        assert_eq!(storage.0.borrow().reloads.len(), 0);
+    }
+
+    #[test]
+    fn test_conflict_reload_discards_the_edit() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+            state.reload_to = Some(loaded("format = \"$plan\"\n"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(format(&app), "$plan", "ディスク上の内容になる");
+        assert!(!app.is_dirty());
+        assert!(!app.draft.can_undo(), "履歴も新しくなる");
+        assert!(app.notice.clone().unwrap().contains("再読み込みしました"));
+        assert!(app.source_label().contains("reloaded.toml"));
+        // 未作成のときも、今の保存先を渡す
+        assert_eq!(storage.0.borrow().reloads, [PathBuf::from("test.toml")]);
+    }
+
+    #[test]
+    fn test_reload_always_uses_the_current_path_even_after_save_as_and_deletion() {
+        let (mut app, storage) = app_with_storage("$model");
+        let conflict = |kind| Some(SaveError::Conflict(kind));
+        let missing = |path: &str| LoadedConfig {
+            config: Config::default(),
+            document: toml_edit::DocumentMut::new(),
+            source: ConfigSource::Missing {
+                target: PathBuf::from(path),
+                from_link: false,
+            },
+        };
+
+        // 起動時のパス（test.toml）で衝突 → 別名（test.toml.new）で保存する
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = conflict(ConflictKind::Changed);
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.source_label().contains("test.toml.new"));
+
+        // 別名のファイルが外部で削除された → 保存で衝突 → 再読み込み。未作成になり、保存先は別名のまま
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = conflict(ConflictKind::Deleted);
+            state.reload_to = Some(missing("test.toml.new"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert!(app.source_label().contains("未作成"));
+        assert!(app.source_label().contains("test.toml.new"));
+
+        // 外部で再作成された → 保存で衝突 → 再読み込み。起動時のパスへ戻らず、別名のパスを読む
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = conflict(ConflictKind::Created);
+            state.reload_to = Some(loaded("format = \"$plan\"\n"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            storage.0.borrow().reloads,
+            [
+                PathBuf::from("test.toml.new"),
+                PathBuf::from("test.toml.new")
+            ],
+            "どちらも、そのときの編集対象のパス"
+        );
+        assert_eq!(format(&app), "$plan");
+    }
+
+    #[test]
+    fn test_conflict_reload_failure_is_shown() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Deleted));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r')); // `reload_to` がないので、失敗する
+        assert!(app.message.is_some());
+        assert!(app.is_dirty(), "読み込めなかったときは、編集を捨てない");
+        assert_eq!(format(&app), "$model\n");
+    }
+
+    #[test]
+    fn test_conflict_save_as() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.mode, Mode::Normal);
+        let input = app.input.as_ref().expect("パスの入力が始まる");
+        assert_eq!(input.target, InputTarget::SavePath);
+        assert_eq!(
+            input.value(),
+            "test.toml.new",
+            "元のパスに .new を足した既定"
+        );
+
+        // パスを書き換えて保存する。入力中は、`q` や `s` も文字になる
+        for _ in 0.."test.toml.new".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "other.toml");
+        let expected = app.draft.to_toml();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none());
+        assert_eq!(
+            storage.0.borrow().save_as,
+            [(PathBuf::from("other.toml"), expected)]
+        );
+        assert!(!app.is_dirty());
+        assert!(
+            app.source_label().contains("other.toml"),
+            "保存先が編集中のファイルになる"
+        );
+    }
+
+    #[test]
+    fn test_save_as_refuses_existing_files_and_empty_paths() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+
+        // 既にファイルがあるパスは、上書きせず、入力を続ける
+        storage.0.borrow_mut().save_as_error = Some(SaveError::Conflict(ConflictKind::Created));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some());
+        let message = app.message.clone().unwrap();
+        assert!(message.contains("上書きしません"), "{message}");
+        assert!(message.contains("test.toml.new"), "{message}");
+        assert!(app.is_dirty());
+
+        // 空のパスは、保存せず、入力を続ける
+        for _ in 0.."test.toml.new".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        let calls = storage.0.borrow().save_as.len();
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some());
+        assert_eq!(storage.0.borrow().save_as.len(), calls, "保存を試みない");
+        assert!(app.message.clone().unwrap().contains("パスを入力"));
+
+        // Esc で取り消すと、編集は残り、通常の状態へ戻る
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.is_dirty());
     }
 }

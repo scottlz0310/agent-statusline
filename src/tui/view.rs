@@ -8,13 +8,14 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::LayoutEditor;
+use crate::editor::save::ConflictKind;
 use crate::editor::update::PropValue;
 use crate::editor::validate::Severity;
 use crate::engine::config::Config;
 use crate::engine::parts::PropKind;
 use crate::preview::width::{Overflow, display_width, fit_line};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
-use crate::tui::app::{App, Focus, WidthChoice};
+use crate::tui::app::{App, Focus, InputTarget, Mode, WidthChoice};
 use crate::tui::palette::{self, PaletteItem};
 
 /// プレビューの最大の表示行数。それ以上は、切り詰めて表示する
@@ -29,11 +30,6 @@ const PROP_KEY_WIDTH: usize = 20;
 /// プロパティ欄で、同時に見せる行数の上限。それ以上は、選択中の行が見える位置までずらす
 const MAX_PROP_ROWS: usize = 7;
 
-pub struct ViewContext<'a> {
-    /// 編集対象の設定ファイルの説明（ヘッダーに表示する）
-    pub source_label: &'a str,
-}
-
 /// ratatui の外で、生の ANSI として端末へ出力する内容と位置
 #[derive(Debug, PartialEq, Eq)]
 pub struct RawOverlay {
@@ -45,7 +41,7 @@ pub struct RawOverlay {
 
 /// 画面を描き、ratatui を介さず生の ANSI で出す領域（プレビューと部品の表示例）を返す。
 /// 生の ANSI は、ratatui の色の指定（256 色の指標）を通さないので、`render` の出力と同じ色になる
-pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> {
+pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     // 部品一覧にフォーカスがあるときは、選択中の項目を仮に入れた配置を見せる
     let tentative = app.tentative_editor();
     let editor = tentative.as_ref().unwrap_or(app.draft.layout());
@@ -76,12 +72,14 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
     let preview_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
 
     let props_height = u16::try_from(props_rows(app) + 2).unwrap_or(u16::MAX);
+    let status_rows = status_lines(app, usize::from(area.width));
+    let status_height = u16::try_from(status_rows.len()).unwrap_or(1);
     let [header, preview, middle, props, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Min(3),
         Constraint::Length(props_height),
-        Constraint::Length(1),
+        Constraint::Length(status_height),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -90,8 +88,13 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
 
     frame.render_widget(
         Line::from(format!(
-            "agent-statusline config — 配置の編集（まだ保存できません）  設定: {}",
-            ctx.source_label
+            "agent-statusline config — {}  設定: {}",
+            if app.is_dirty() {
+                "未保存の変更あり"
+            } else {
+                "変更なし"
+            },
+            app.source_label()
         ))
         .style(Style::default().add_modifier(Modifier::BOLD)),
         header,
@@ -101,7 +104,7 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
     draw_layout(frame, app, editor, config, layout_area, columns);
     overlays.extend(draw_parts(frame, app, config, parts, columns));
     draw_props(frame, app, props);
-    frame.render_widget(status_line(app), status);
+    frame.render_widget(Paragraph::new(status_rows), status);
     frame.render_widget(
         Line::from(footer_text(app)).style(Style::default().add_modifier(Modifier::DIM)),
         footer,
@@ -110,20 +113,30 @@ pub fn draw(frame: &mut Frame, app: &App, ctx: &ViewContext) -> Vec<RawOverlay> 
 }
 
 fn footer_text(app: &App) -> &'static str {
-    if app.input.is_some() {
-        return "入力中  Enter: 確定  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除";
+    if let Some(input) = &app.input {
+        return match input.target {
+            InputTarget::Prop { .. } => {
+                "入力中  Enter: 確定  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除"
+            }
+            InputTarget::SavePath => {
+                "別名で保存  Enter: 保存  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除"
+            }
+        };
     }
+    // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
         Focus::Layout => {
-            "Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す  q: 終了"
+            "s: 保存  q: 終了  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
         }
         Focus::Parts => {
-            "Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す  q: 終了"
+            "s: 保存  q: 終了  Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す"
         }
         Focus::Props => {
-            "Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す  q: 終了"
+            "s: 保存  q: 終了  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
         }
-        Focus::Preview => "Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す  q: 終了",
+        Focus::Preview => {
+            "s: 保存  q: 終了  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
+        }
     }
 }
 
@@ -324,10 +337,11 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(key, key_style),
                 Span::raw(" "),
             ];
-            let editing = app
-                .input
-                .as_ref()
-                .filter(|input| input.part == part.id && input.key == prop.key);
+            let target = InputTarget::Prop {
+                part: part.id,
+                key: prop.key,
+            };
+            let editing = app.input.as_ref().filter(|input| input.target == target);
             if let Some(input) = editing {
                 // 行頭の印（`> `）、項目名、区切りの空白を除いた、入力欄に使える幅
                 let room = usize::from(inner.width).saturating_sub(2 + PROP_KEY_WIDTH + 1);
@@ -432,25 +446,78 @@ fn input_spans(value: &str, cursor: usize, width: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// 状態行。入力中に受け付けられない値になっていれば、その理由、直前の操作が受け付けられなかった理由、
-/// 検証の結果（エラーと警告の件数と、先頭の 1 件）の順に出す
+/// 状態の行。別名で保存するパスの入力中は 2 行（上: 保存できなかった理由か案内、下: 入力）、
+/// それ以外は 1 行（`status_line`）。理由が入力欄に押し出されて、画面の外に切れないようにする
+fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(input) = &app.input else {
+        return vec![status_line(app)];
+    };
+    if input.target != InputTarget::SavePath {
+        return vec![status_line(app)];
+    }
+    let label = "別名で保存するパス: ";
+    let room = width.saturating_sub(display_width(label));
+    let mut spans = vec![Span::raw(label)];
+    spans.extend(input_spans(&input.value(), input.cursor(), room));
+    let first = match &app.message {
+        Some(message) => Line::from(Span::styled(
+            format!("受け付けられません: {message}"),
+            Style::default().fg(Color::Red),
+        )),
+        None => Line::from(Span::styled(
+            "保存先のパスを入力してください（既にあるファイルは上書きしません）",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    };
+    vec![first, Line::from(spans)]
+}
+
+/// 状態行。優先順位は、(1) 確認・選択（未保存で終了、保存の競合）、
+/// (2) 入力中に受け付けられない値の理由、(3) 直前の操作が受け付けられなかった理由、(4) 直前の操作の知らせ、
+/// (5) 検証の結果（エラーと警告の件数と、先頭の 1 件）
 fn status_line(app: &App) -> Line<'static> {
     let red = Style::default().fg(Color::Red);
+    let yellow = Style::default().fg(Color::Yellow);
+    let text = |text: String, style: Style| Line::from(Span::styled(text, style));
+
+    match app.mode {
+        Mode::ConfirmQuit => {
+            return text(
+                "未保存の変更があります。 y: 保存せず終了  s: 保存して終了  その他のキー: 戻る"
+                    .to_string(),
+                yellow,
+            );
+        }
+        Mode::Conflict(kind) => {
+            let reason = match kind {
+                ConflictKind::Changed => "設定ファイルが外部で変更されました",
+                ConflictKind::Deleted => "設定ファイルが外部で削除されました",
+                ConflictKind::Created => "設定ファイルが他で作成されました",
+            };
+            return text(
+                format!(
+                    "{reason}。 r: 再読み込み（今の編集を破棄）  a: 別名で保存  その他のキー: 戻る"
+                ),
+                red,
+            );
+        }
+        Mode::Normal => {}
+    }
     if let Some(Err(err)) = app.input_preview() {
-        return Line::from(Span::styled(
-            format!("入力は受け付けられません: {err}"),
-            red,
-        ));
+        return text(format!("入力は受け付けられません: {err}"), red);
     }
     if let Some(message) = &app.message {
-        return Line::from(Span::styled(format!("受け付けられません: {message}"), red));
+        return text(format!("受け付けられません: {message}"), red);
+    }
+    if let Some(notice) = &app.notice {
+        return text(notice.clone(), Style::default().fg(Color::Green));
     }
     let issues = app.draft.issues();
     if issues.is_empty() {
-        return Line::from(Span::styled(
-            "検証: 問題なし",
+        return text(
+            "検証: 問題なし".to_string(),
             Style::default().fg(Color::Green),
-        ));
+        );
     }
     let errors = issues
         .iter()
@@ -466,18 +533,14 @@ fn status_line(app: &App) -> Line<'static> {
     } else {
         format!("{}: ", first.path)
     };
-    let style = if errors > 0 {
-        red
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-    Line::from(Span::styled(
+    let style = if errors > 0 { red } else { yellow };
+    text(
         format!(
             "検証: エラー {errors} 件 / 警告 {warnings} 件 — {location}{}",
             first.message
         ),
         style,
-    ))
+    )
 }
 
 /// 部品一覧。項目名に続けて、選択中のシナリオでの表示例を、生の ANSI で出す。
@@ -559,11 +622,11 @@ mod tests {
     use crate::engine::config::DEFAULT_FORMAT;
 
     fn new_app() -> App {
-        App::new(Draft::with_format(DEFAULT_FORMAT))
+        App::for_test(Draft::with_format(DEFAULT_FORMAT))
     }
 
     fn app_with_focus(format: &str, focus: Focus) -> App {
-        let mut app = App::new(Draft::with_format(format));
+        let mut app = App::for_test(Draft::with_format(format));
         app.focus = focus;
         app
     }
@@ -591,14 +654,9 @@ mod tests {
     }
 
     fn render(app: &App, width: u16, height: u16) -> (Vec<String>, Vec<RawOverlay>) {
-        let ctx = ViewContext {
-            source_label: "（テスト）",
-        };
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut overlays = Vec::new();
-        terminal
-            .draw(|frame| overlays = draw(frame, app, &ctx))
-            .unwrap();
+        terminal.draw(|frame| overlays = draw(frame, app)).unwrap();
         (screen(&terminal), overlays)
     }
 
@@ -617,8 +675,8 @@ mod tests {
         let (screen, overlays) = render(&new_app(), 100, 40);
         let text = screen.join("\n");
         for expected in [
-            "配置の編集（まだ保存できません）",
-            "設定: （テスト）",
+            "変更なし",
+            "設定: 未作成（保存すると作成されます: test.toml）",
             "シナリオ: 通常",
             "directory", // 配置領域と部品一覧の両方
             "review",
@@ -799,15 +857,10 @@ mod tests {
         // 部品の `format` に改行を書いても、表示例は 1 行の領域に収まる
         let mut config = Config::default();
         config.directory.format = "A\nB".to_string();
-        let ctx = ViewContext {
-            source_label: "（テスト）",
-        };
-        let app = App::new(Draft::new(config, toml_edit::DocumentMut::new()));
+        let app = App::for_test(Draft::new(config, toml_edit::DocumentMut::new()));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut overlays = Vec::new();
-        terminal
-            .draw(|frame| overlays = draw(frame, &app, &ctx))
-            .unwrap();
+        terminal.draw(|frame| overlays = draw(frame, &app)).unwrap();
         // 部品の表示例は、プレビューの次から。どの overlay にも、改行・復帰は含まれない
         let sample = &overlays[1];
         assert_eq!(sample.lines.len(), 1);
@@ -857,7 +910,7 @@ mod tests {
 
     #[test]
     fn test_draw_preview_follows_the_edited_layout() {
-        let mut app = App::new(Draft::with_format("$model $quota"));
+        let mut app = App::for_test(Draft::with_format("$model $quota"));
         let (_, overlays) = render(&app, 100, 24);
         assert!(overlay_text(&overlays[..1]).contains("Claude Opus"));
 
@@ -918,7 +971,7 @@ mod tests {
 
     /// 配置の先頭が `format` のアプリで、プロパティ欄にフォーカスを移す
     fn props_app(format: &str) -> App {
-        let mut app = App::new(Draft::with_format(format));
+        let mut app = App::for_test(Draft::with_format(format));
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Focus::Props);
         app
@@ -965,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_props_pane_without_a_target_part_shows_guidance() {
-        let mut app = App::new(Draft::with_format("$directory |"));
+        let mut app = App::for_test(Draft::with_format("$directory |"));
         press(&mut app, KeyCode::Right); // 固定テキスト
         let shown = text(&app, 110, 40);
         assert!(
@@ -976,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_props_pane_follows_the_parts_list_selection() {
-        let mut app = App::new(Draft::with_format("$directory"));
+        let mut app = App::for_test(Draft::with_format("$directory"));
         press(&mut app, KeyCode::BackTab); // プレビュー
         press(&mut app, KeyCode::BackTab); // 部品一覧
         for _ in 0..4 {
@@ -1041,7 +1094,7 @@ mod tests {
     fn test_status_line_reports_existing_issues() {
         let toml = "[nothing]\nx = 1\n\n[model]\nstyle = \"cyna\"\n";
         let config = toml_edit::de::from_str::<Config>(toml).unwrap();
-        let app = App::new(Draft::new(config, toml.parse().unwrap()));
+        let app = App::for_test(Draft::new(config, toml.parse().unwrap()));
         let shown = text(&app, 130, 40);
         // エラーを先に出す
         assert!(
@@ -1056,7 +1109,7 @@ mod tests {
     fn test_status_line_reports_warnings_when_there_are_no_errors() {
         let toml = "[nothing]\nx = 1\n";
         let config = toml_edit::de::from_str::<Config>(toml).unwrap();
-        let app = App::new(Draft::new(config, toml.parse().unwrap()));
+        let app = App::for_test(Draft::new(config, toml.parse().unwrap()));
         let shown = text(&app, 130, 40);
         assert!(
             shown.contains("検証: エラー 0 件 / 警告 1 件 — nothing: "),
@@ -1138,11 +1191,8 @@ mod tests {
             for key in keys {
                 press(&mut app, key);
             }
-            let ctx = ViewContext {
-                source_label: "（テスト）",
-            };
             let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
-            terminal.draw(|frame| _ = draw(frame, &app, &ctx)).unwrap();
+            terminal.draw(|frame| _ = draw(frame, &app)).unwrap();
             let buffer = terminal.backend().buffer();
             // 入力欄は、項目名の列（x = 1 + 2 + 20 + 1）より右。そこに反転したセルが 1 つ以上ある
             let value_x = 1 + 2 + 20 + 1;
@@ -1174,5 +1224,159 @@ mod tests {
             !shown.contains("  format "),
             "先頭の行は、上へずれて見えない\n{shown}"
         );
+    }
+
+    // ---- 保存・未保存・競合の表示 ----
+
+    use crate::editor::save::SaveError;
+    use crate::tui::storage::fake::FakeStorage;
+
+    fn storage_app(format: &str) -> (App, FakeStorage) {
+        let storage = FakeStorage::default();
+        let app = App::with_storage_for_test(Draft::with_format(format), Box::new(storage.clone()));
+        (app, storage)
+    }
+
+    #[test]
+    fn test_header_and_footer_show_the_save_state() {
+        let (mut app, _) = storage_app("$model");
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("変更なし"), "{shown}");
+        assert!(shown.contains("s: 保存  q: 終了"), "{shown}");
+
+        press(&mut app, KeyCode::Char('a'));
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("未保存の変更あり"), "{shown}");
+        assert!(!shown.contains("変更なし"), "{shown}");
+
+        // どのフォーカスでも、保存と終了のキーは見える（狭い端末でも切れない先頭に置く）
+        for focus in [Focus::Layout, Focus::Parts, Focus::Props, Focus::Preview] {
+            app.focus = focus;
+            let shown = text(&app, 60, 40);
+            assert!(shown.contains("s: 保存  q: 終了"), "{focus:?}\n{shown}");
+        }
+    }
+
+    #[test]
+    fn test_status_shows_the_saved_notice_then_clears_it() {
+        let (mut app, _) = storage_app("$model");
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('s'));
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("保存しました: test.toml"), "{shown}");
+        assert!(shown.contains("変更なし"), "{shown}");
+        press(&mut app, KeyCode::Down);
+        assert!(!text(&app, 100, 40).contains("保存しました"));
+    }
+
+    #[test]
+    fn test_status_shows_the_quit_confirmation() {
+        let (mut app, _) = storage_app("$model");
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('q'));
+        let shown = text(&app, 120, 40);
+        assert!(
+            shown.contains("未保存の変更があります。 y: 保存せず終了  s: 保存して終了"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn test_status_shows_the_conflict_choices() {
+        // (名前, 衝突の種類, 期待する理由)
+        let cases = [
+            ("changed", ConflictKind::Changed, "外部で変更されました"),
+            ("deleted", ConflictKind::Deleted, "外部で削除されました"),
+            ("created", ConflictKind::Created, "他で作成されました"),
+        ];
+        for (name, kind, reason) in cases {
+            let (mut app, storage) = storage_app("$model");
+            press(&mut app, KeyCode::Char('a'));
+            storage.0.borrow_mut().save_error = Some(SaveError::Conflict(kind));
+            press(&mut app, KeyCode::Char('s'));
+            let shown = text(&app, 140, 40);
+            assert!(shown.contains(reason), "{name}\n{shown}");
+            assert!(
+                shown.contains("r: 再読み込み（今の編集を破棄）"),
+                "{name}\n{shown}"
+            );
+            assert!(shown.contains("a: 別名で保存"), "{name}\n{shown}");
+        }
+    }
+
+    #[test]
+    fn test_status_shows_the_save_path_input_and_its_error() {
+        let (mut app, storage) = storage_app("$model");
+        press(&mut app, KeyCode::Char('a'));
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        let shown = text(&app, 120, 40);
+        assert!(
+            shown.contains("別名で保存するパス: [test.toml.new ]"),
+            "{shown}"
+        );
+        assert!(shown.contains("別名で保存  Enter: 保存"), "{shown}");
+
+        // 保存できなかった理由は、同じ行に出る
+        storage.0.borrow_mut().save_as_error = Some(SaveError::Conflict(ConflictKind::Created));
+        press(&mut app, KeyCode::Enter);
+        let shown = text(&app, 160, 40);
+        assert!(
+            shown.contains("別名で保存するパス: [test.toml.new ]"),
+            "{shown}"
+        );
+        assert!(shown.contains("上書きしません"), "{shown}");
+    }
+
+    #[test]
+    fn test_save_path_error_is_visible_on_narrow_terminals_and_long_paths() {
+        // (名前, 端末の幅, 端末の高さ)
+        for (name, width) in [
+            ("80-columns", 80_u16),
+            ("120-columns", 120),
+            ("60-columns", 60),
+        ] {
+            let (mut app, storage) = storage_app("$model");
+            press(&mut app, KeyCode::Char('a'));
+            storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+            press(&mut app, KeyCode::Char('s'));
+            press(&mut app, KeyCode::Char('a'));
+
+            // 長いパスを足す
+            for _ in 0..3 {
+                for c in "/very/long/directory/name/that/does/not/fit".chars() {
+                    press(&mut app, KeyCode::Char(c));
+                }
+            }
+            storage.0.borrow_mut().save_as_error = Some(SaveError::Conflict(ConflictKind::Created));
+            press(&mut app, KeyCode::Enter);
+            assert!(app.input.is_some(), "{name}");
+
+            let shown = text(&app, width, 40);
+            // 失敗の理由と、入力（カーソルの `]`）の両方が、画面に出る
+            assert!(
+                shown.contains("上書きしません"),
+                "{name}: 理由が出ない\n{shown}"
+            );
+            assert!(shown.contains("別名で保存するパス: ["), "{name}\n{shown}");
+            assert!(
+                shown
+                    .lines()
+                    .any(|line| line.contains("別名で保存するパス: [") && line.contains(']')),
+                "{name}: 入力欄が閉じていない（カーソルが切れている）\n{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_path_hint_is_shown_before_any_error() {
+        let (mut app, storage) = storage_app("$model");
+        press(&mut app, KeyCode::Char('a'));
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("保存先のパスを入力してください"), "{shown}");
     }
 }

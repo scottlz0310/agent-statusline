@@ -29,7 +29,7 @@ pub enum Commands {
         bench: bool,
     },
 
-    /// Preview the statusline configuration interactively (read-only)
+    /// Edit the statusline configuration interactively, with a live preview
     Config {
         /// Path to custom config file
         #[arg(short, long)]

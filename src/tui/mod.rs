@@ -1,9 +1,10 @@
-//! 設定 TUI（`agent-statusline config`）。現状は、配置とプロパティの編集とプレビュー（設定 TUI フェーズ 1-3）。保存はまだできない。
+//! 設定 TUI（`agent-statusline config`）。配置とプロパティの編集、プレビュー、保存。
 //!
 //! 状態遷移は `app`、部品一覧の項目は `palette`、画面は `view` に置き、ここは端末とイベントの入出力だけを行う。
 
 mod app;
 mod palette;
+mod storage;
 mod view;
 
 use std::io::{self, IsTerminal, Write};
@@ -16,33 +17,22 @@ use ratatui::crossterm::queue;
 use ratatui::crossterm::style::Print;
 
 use crate::editor::draft::Draft;
-use crate::editor::load::{ConfigEnv, ConfigSource, load_config_strict};
+use crate::editor::load::{ConfigEnv, load_config_strict};
 use app::App;
-use view::{RawOverlay, ViewContext, draw};
+use storage::FileStorage;
+use view::{RawOverlay, draw};
 
 pub fn run(config_path: Option<&Path>) -> io::Result<()> {
     ensure_interactive(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let loaded =
         load_config_strict(config_path, &ConfigEnv::from_process()).map_err(io::Error::other)?;
-    let label = match &loaded.source {
-        ConfigSource::Existing { path, .. } if path.requested == path.real => {
-            path.requested.display().to_string()
-        }
-        ConfigSource::Existing { path, .. } => {
-            format!("{} → {}", path.requested.display(), path.real.display())
-        }
-        ConfigSource::Missing { target, .. } => {
-            format!("未作成（既定値で表示。保存先: {}）", target.display())
-        }
-    };
-    let ctx = ViewContext {
-        source_label: &label,
-    };
     let draft = Draft::new(loaded.config, loaded.document);
+    let storage = FileStorage::from_process();
+    let app = App::new(draft, loaded.source, Box::new(storage));
 
     enable_color_output();
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &ctx, draft);
+    let result = event_loop(&mut terminal, app);
     ratatui::restore();
     result
 }
@@ -65,13 +55,12 @@ fn ensure_interactive(stdin_is_terminal: bool, stdout_is_terminal: bool) -> io::
     }
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, ctx: &ViewContext, draft: Draft) -> io::Result<()> {
-    let mut app = App::new(draft);
+fn event_loop(terminal: &mut DefaultTerminal, mut app: App) -> io::Result<()> {
     while !app.should_quit {
         // 生 ANSI の出力は、ratatui が把握していない（差分描画で消えない）ので、毎回全体を描き直す
         terminal.clear()?;
         let mut overlays = Vec::new();
-        terminal.draw(|frame| overlays = draw(frame, &app, ctx))?;
+        terminal.draw(|frame| overlays = draw(frame, &app))?;
         for overlay in &overlays {
             write_overlay(overlay)?;
         }
