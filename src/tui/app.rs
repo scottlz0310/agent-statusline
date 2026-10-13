@@ -16,6 +16,7 @@ use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
 use crate::tui::palette::{self, PaletteItem};
 use crate::tui::storage::Storage;
+use crate::tui::symbols;
 
 /// プレビューの幅の選択。`Auto` は実端末の幅
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,25 @@ impl TextInput {
     }
 }
 
+/// 記号（`PropKind::Symbol`）の候補の選択。選んでいる間も、プレビューに反映する
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picker {
+    pub part: &'static str,
+    pub key: &'static str,
+    pub candidates: Vec<String>,
+    index: usize,
+}
+
+impl Picker {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn selected(&self) -> &str {
+        &self.candidates[self.index]
+    }
+}
+
 /// 画面の下に出す確認・選択の状態。`Normal` 以外のとき、キーはその選択に使われる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -145,6 +165,8 @@ pub struct App {
     /// 部品一覧から `BackTab` で入れば部品一覧
     props_from: Focus,
     pub input: Option<TextInput>,
+    /// 記号の候補の選択（開いているとき）
+    pub picker: Option<Picker>,
     /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
     pub message: Option<String>,
     /// 直前の操作の結果の知らせ（保存した、など。次のキー入力で消える）
@@ -195,6 +217,7 @@ impl App {
             props_index: 0,
             props_from: Focus::Layout,
             input: None,
+            picker: None,
             message: None,
             scenario_index: 0,
             width_index: 0,
@@ -254,6 +277,31 @@ impl App {
         };
         let value = PropValue::Str(input.value());
         Some(self.draft.preview_prop(part, key, &value))
+    }
+
+    /// 記号の候補を選んでいるとき、その候補を確定したと仮定した設定。プレビューに使う（下書きは変えない）
+    pub fn picker_preview(&self) -> Option<Result<Config, PropError>> {
+        let picker = self.picker.as_ref()?;
+        let value = PropValue::Str(picker.selected().to_string());
+        Some(self.draft.preview_prop(picker.part, picker.key, &value))
+    }
+
+    /// 確定前の入力・選択を、確定したと仮定した設定（プレビュー用）。何も入力・選択していなければ `None`
+    pub fn live_preview(&self) -> Option<Result<Config, PropError>> {
+        self.picker_preview().or_else(|| self.input_preview())
+    }
+
+    /// 記号の入力・選択の対象の値（表示幅の案内用）。記号以外を編集しているときは `None`
+    pub fn symbol_in_progress(&self) -> Option<String> {
+        if let Some(picker) = &self.picker {
+            return Some(picker.selected().to_string());
+        }
+        let input = self.input.as_ref()?;
+        let InputTarget::Prop { part, key } = input.target else {
+            return None;
+        };
+        let spec = find(part)?.props.iter().find(|prop| prop.key == key)?;
+        matches!(spec.kind, PropKind::Symbol).then(|| input.value())
     }
 
     /// 未保存の変更があるか。元に戻して、最後に保存した内容と同じになれば、なくなる
@@ -317,6 +365,10 @@ impl App {
             self.handle_input_key(key);
             return;
         }
+        if self.picker.is_some() {
+            self.handle_picker_key(key.code);
+            return;
+        }
         if self.mode != Mode::Normal {
             self.handle_mode_key(key.code);
             return;
@@ -341,6 +393,32 @@ impl App {
                 Focus::Parts => self.handle_parts_key(code),
                 Focus::Props => self.handle_props_key(code, key.modifiers),
             },
+        }
+    }
+
+    /// 記号の候補の選択。`Enter` で決定、`e` で自由に入力、`Esc` で閉じる
+    fn handle_picker_key(&mut self, key: KeyCode) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        match key {
+            KeyCode::Up => picker.index = picker.index.saturating_sub(1),
+            KeyCode::Down => picker.index = (picker.index + 1).min(picker.candidates.len() - 1),
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Char('e') => {
+                let (part, key, value) = (picker.part, picker.key, picker.selected().to_string());
+                self.picker = None;
+                self.input = Some(TextInput::prop(part, key, &value));
+            }
+            KeyCode::Enter => {
+                let value = PropValue::Str(picker.selected().to_string());
+                // 受け付けられないときは、開いたままにして、理由を示す
+                match self.draft.set_prop(picker.part, picker.key, &value) {
+                    Ok(()) => self.picker = None,
+                    Err(err) => self.message = Some(err.to_string()),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -549,6 +627,22 @@ impl App {
                     KeyCode::Right => Some(PropValue::Int((value + step).min(100))),
                     _ => None,
                 }
+            }
+            // 記号は、候補から選ぶ（絵文字を入力できない環境がある）。自由に入力するには、候補の一覧で `e`
+            (PropKind::Symbol, PropValue::Str(value)) if key == KeyCode::Enter => {
+                let default = match self.draft.default_value(part.id, prop.key) {
+                    Some(PropValue::Str(default)) => default,
+                    _ => String::new(),
+                };
+                let candidates = symbols::candidates(part.id, prop.key, &value, &default);
+                let index = candidates.iter().position(|c| *c == value).unwrap_or(0);
+                self.picker = Some(Picker {
+                    part: part.id,
+                    key: prop.key,
+                    candidates,
+                    index,
+                });
+                None
             }
             (_, PropValue::Str(value)) if key == KeyCode::Enter => {
                 self.input = Some(TextInput::prop(part.id, prop.key, &value));
@@ -1040,7 +1134,8 @@ mod tests {
     fn test_text_input_commit_and_cancel() {
         let mut app = props_app("git_branch");
         select_prop(&mut app, "symbol");
-        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter); // 記号は、候補の一覧が開く
+        press(&mut app, KeyCode::Char('e')); // 自由に入力する
         let input = app.input.as_ref().expect("入力が始まる");
         assert_eq!(input.value(), "🌿 ");
         assert_eq!(input.cursor(), 2);
@@ -1074,6 +1169,7 @@ mod tests {
 
         // Esc で取り消すと、何も変わらない
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e'));
         type_text(&mut app, "xyz");
         press(&mut app, KeyCode::Esc);
         assert!(app.input.is_none());
@@ -1089,7 +1185,6 @@ mod tests {
     fn test_text_input_editing_keys() {
         let mut app = props_app("git_branch");
         select_prop(&mut app, "symbol");
-        press(&mut app, KeyCode::Enter);
         app.input = Some(TextInput::prop("git_branch", "symbol", "ab🌿c"));
         // (名前, 操作, 期待する値, 期待するカーソル)
         let cases: [(&str, KeyCode, &str, usize); 10] = [
@@ -1284,6 +1379,7 @@ mod tests {
         let mut app = props_app("git_branch");
         select_prop(&mut app, "symbol");
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e'));
         press(&mut app, KeyCode::Char('s'));
         assert_eq!(app.input.as_ref().unwrap().value(), "🌿 s");
         assert!(!app.draft.can_undo(), "保存でも確定でもない");
@@ -1518,5 +1614,140 @@ mod tests {
         assert!(app.input.is_none());
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.is_dirty());
+    }
+
+    // ---- 記号の候補の選択 ----
+
+    #[test]
+    fn test_enter_on_a_symbol_opens_the_picker_at_the_current_value() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.input.is_none(),
+            "記号は、すぐには文字列の入力にならない"
+        );
+        let picker = app.picker.as_ref().expect("候補の一覧が開く");
+        assert_eq!((picker.part, picker.key), ("git_branch", "symbol"));
+        assert_eq!(picker.selected(), "🌿 ", "今の値を選んでいる");
+        assert!(picker.candidates.iter().any(|c| c == "🌱 "));
+        assert!(picker.candidates.iter().any(String::is_empty), "記号なし");
+    }
+
+    #[test]
+    fn test_picker_previews_then_applies_or_cancels() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.picker.as_ref().unwrap().selected(), "🌱 ");
+        // 選んでいる間も、プレビューには反映する。下書きは変えない
+        let preview = app.live_preview().unwrap().unwrap();
+        assert_eq!(preview.git_branch.symbol, "🌱 ");
+        assert_eq!(app.draft.config().git_branch.symbol, "🌿 ");
+        assert!(!app.draft.can_undo());
+
+        // Enter で決定。元に戻せる
+        press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_none());
+        assert_eq!(app.draft.config().git_branch.symbol, "🌱 ");
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.draft.config().git_branch.symbol, "🌿 ");
+
+        // Esc は、一覧を閉じるだけ（終了しない）。何も変わらない
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.picker.is_none());
+        assert!(!app.should_quit);
+        assert_eq!(app.draft.config().git_branch.symbol, "🌿 ");
+        assert!(!app.draft.can_undo());
+    }
+
+    #[test]
+    fn test_picker_navigation_clamps_and_ignores_other_keys() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Up);
+        }
+        assert_eq!(app.picker.as_ref().unwrap().index(), 0);
+        let last = app.picker.as_ref().unwrap().candidates.len() - 1;
+        for _ in 0..last + 5 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.picker.as_ref().unwrap().index(), last);
+
+        // 終了・保存・元に戻す・フォーカス移動は、一覧が開いている間は効かない
+        for key in [
+            KeyCode::Char('q'),
+            KeyCode::Char('s'),
+            KeyCode::Char('u'),
+            KeyCode::Tab,
+        ] {
+            press(&mut app, key);
+            assert!(app.picker.is_some(), "{key:?}");
+            assert!(!app.should_quit, "{key:?}");
+            assert_eq!(app.focus, Focus::Props, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn test_picker_e_switches_to_free_text_input_with_the_selected_candidate() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(app.picker.is_none());
+        let input = app.input.as_ref().expect("自由な入力が始まる");
+        assert_eq!(input.value(), "🌱 ", "選んでいた候補から始める");
+        assert_eq!(app.draft.config().git_branch.symbol, "🌿 ");
+    }
+
+    #[test]
+    fn test_picker_keeps_a_custom_current_value_at_the_top() {
+        let mut app = props_app("git_branch");
+        app.draft
+            .set_prop("git_branch", "symbol", &PropValue::from("Z"))
+            .unwrap();
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.selected(), "Z");
+        assert_eq!(picker.index(), 0);
+        assert!(
+            picker.candidates.iter().any(|c| c == "🌿 "),
+            "既定値も選べる"
+        );
+    }
+
+    #[test]
+    fn test_non_symbol_rows_still_open_a_text_input_directly() {
+        let mut app = props_app("git_branch");
+        select_prop(&mut app, "style");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_none());
+        assert!(app.input.is_some());
+    }
+
+    #[test]
+    fn test_symbol_in_progress_follows_the_picker_and_symbol_inputs_only() {
+        let mut app = props_app("git_branch");
+        assert_eq!(app.symbol_in_progress(), None);
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.symbol_in_progress().as_deref(), Some("🌿 "));
+        press(&mut app, KeyCode::Char('e'));
+        type_text(&mut app, "X");
+        assert_eq!(app.symbol_in_progress().as_deref(), Some("🌿 X"));
+        press(&mut app, KeyCode::Esc);
+
+        // 記号でない行の入力は、対象外
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_some());
+        assert_eq!(app.symbol_in_progress(), None);
     }
 }

@@ -13,7 +13,7 @@ use crate::editor::update::PropValue;
 use crate::editor::validate::Severity;
 use crate::engine::config::Config;
 use crate::engine::parts::PropKind;
-use crate::preview::width::{Overflow, display_width, fit_line};
+use crate::preview::width::{Overflow, display_width, fit_line, symbol_notes};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
 use crate::tui::app::{App, Focus, InputTarget, Mode, WidthChoice};
 use crate::tui::palette::{self, PaletteItem};
@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     let editor = tentative.as_ref().unwrap_or(app.draft.layout());
     // 編集中の配置を、設定の `format` として描画する（保存するまで、設定ファイルは変わらない）
     // 文字列の入力中は、確定したと仮定した設定で描く（エラーのときは、確定済みの設定）
-    let live = app.input_preview().and_then(Result::ok);
+    let live = app.live_preview().and_then(Result::ok);
     let mut edited = live.unwrap_or_else(|| app.draft.config().clone());
     edited.format = editor.layout().to_format();
     let config = &edited;
@@ -102,7 +102,12 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
 
     let mut overlays = vec![draw_preview(frame, app, preview, &lines, columns, too_wide)];
     draw_layout(frame, app, editor, config, layout_area, columns);
-    overlays.extend(draw_parts(frame, app, config, parts, columns));
+    if app.picker.is_some() {
+        // 記号の候補を選んでいる間は、部品一覧の場所に候補を出す（部品の表示例の生 ANSI と重ならない）
+        draw_picker(frame, app, parts);
+    } else {
+        overlays.extend(draw_parts(frame, app, config, parts, columns));
+    }
     draw_props(frame, app, props);
     frame.render_widget(Paragraph::new(status_rows), status);
     frame.render_widget(
@@ -122,6 +127,9 @@ fn footer_text(app: &App) -> &'static str {
                 "別名で保存  Enter: 保存  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除"
             }
         };
+    }
+    if app.picker.is_some() {
+        return "記号を選ぶ  ↑↓: 選ぶ  Enter: 決定  e: 自由に入力  Esc: 閉じる";
     }
     // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
@@ -503,7 +511,7 @@ fn status_line(app: &App) -> Line<'static> {
         }
         Mode::Normal => {}
     }
-    if let Some(Err(err)) = app.input_preview() {
+    if let Some(Err(err)) = app.live_preview() {
         return text(format!("入力は受け付けられません: {err}"), red);
     }
     if let Some(message) = &app.message {
@@ -511,6 +519,10 @@ fn status_line(app: &App) -> Line<'static> {
     }
     if let Some(notice) = &app.notice {
         return text(notice.clone(), Style::default().fg(Color::Green));
+    }
+    if let Some(symbol) = app.symbol_in_progress() {
+        let (text_line, style) = symbol_info(&symbol);
+        return text(text_line, style);
     }
     let issues = app.draft.issues();
     if issues.is_empty() {
@@ -541,6 +553,75 @@ fn status_line(app: &App) -> Line<'static> {
         ),
         style,
     )
+}
+
+/// 記号の表示幅と、端末によって食い違いうる点の注意（状態行用）
+fn symbol_info(symbol: &str) -> (String, Style) {
+    let notes = symbol_notes(symbol);
+    let width = display_width(symbol);
+    if notes.is_empty() {
+        return (
+            format!("記号の表示幅: {width}"),
+            Style::default().add_modifier(Modifier::DIM),
+        );
+    }
+    (
+        format!("記号の表示幅: {width}（注意: {}）", notes.join(" / ")),
+        Style::default().fg(Color::Yellow),
+    )
+}
+
+/// 記号の候補の一覧（部品一覧の場所）。各候補に、表示幅と、注意があるときは `!` を添える。
+/// 選んでいる候補の詳しい注意は、状態行に出す。表示幅の列を先に出し、絵文字の幅の食い違いで、右側がずれにくくする
+fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(picker) = &app.picker else {
+        return;
+    };
+    let mut block = focus_block(
+        format!(" 記号の候補: {}.{} ", picker.part, picker.key),
+        true,
+    );
+    if cfg!(windows) {
+        block = block.title_bottom(" Windows では絵文字を入力できないため、ここから選びます ");
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let height = usize::from(inner.height);
+    let offset = (picker.index() + 1).saturating_sub(height);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let rows: Vec<Line> = picker
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, candidate)| {
+            let is_selected = index == picker.index();
+            let label = if candidate.is_empty() {
+                "（記号なし）".to_string()
+            } else {
+                format!("\"{}\"", candidate.replace(' ', "␣"))
+            };
+            let width_style = if is_selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let mark = if symbol_notes(candidate).is_empty() {
+                " "
+            } else {
+                "!"
+            };
+            Line::from(vec![
+                Span::raw(if is_selected { "> " } else { "  " }),
+                Span::styled(format!("幅 {:<2}", display_width(candidate)), width_style),
+                Span::styled(format!(" {mark} "), dim),
+                Span::raw(label),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 /// 部品一覧。項目名に続けて、選択中のシナリオでの表示例を、生の ANSI で出す。
@@ -1045,7 +1126,8 @@ mod tests {
     fn test_text_input_is_shown_and_previewed_live() {
         let mut app = props_app("$git_branch");
         press(&mut app, KeyCode::Down); // symbol
-        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter); // 記号は、候補の一覧が開く
+        press(&mut app, KeyCode::Char('e')); // 自由に入力する
         // 入力中の内容とカーソルが、その行に出る。案内も入力用になる
         let shown = text(&app, 110, 40);
         assert!(shown.contains("symbol"), "{shown}");
@@ -1378,5 +1460,73 @@ mod tests {
         press(&mut app, KeyCode::Char('a'));
         let shown = text(&app, 100, 40);
         assert!(shown.contains("保存先のパスを入力してください"), "{shown}");
+    }
+
+    // ---- 記号の候補の表示 ----
+
+    #[test]
+    fn test_picker_replaces_the_parts_list_and_shows_widths() {
+        let mut app = props_app("$git_branch");
+        press(&mut app, KeyCode::Down); // symbol
+        press(&mut app, KeyCode::Enter);
+        let (screen, overlays) = render(&app, 110, 40);
+        let shown = screen.join("\n");
+        assert!(shown.contains("記号の候補: git_branch.symbol"), "{shown}");
+        assert!(shown.contains("記号を選ぶ  ↑↓: 選ぶ"), "{shown}");
+        // 候補の表示幅（絵文字 + 空白 = 3）と、記号なし
+        assert!(shown.contains("幅 3"), "{shown}");
+        assert!(shown.contains("（記号なし）"), "{shown}");
+        // 部品の表示例（生 ANSI）は出さない。プレビューだけ
+        assert_eq!(overlays.len(), 1, "{overlays:?}");
+        assert!(!shown.contains("> directory"), "部品一覧は隠れる\n{shown}");
+    }
+
+    #[test]
+    fn test_picker_previews_the_selected_candidate_live() {
+        let mut app = props_app("$git_branch");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down); // 🌱
+        let (_, overlays) = render(&app, 110, 40);
+        let preview = overlay_text(&overlays[..1]);
+        assert!(preview.contains("🌱 main"), "{preview}");
+    }
+
+    #[test]
+    fn test_status_shows_the_width_and_notes_of_the_selected_symbol() {
+        // git_branch の既定の記号は、注意なし
+        let mut plain = props_app("$git_branch");
+        press(&mut plain, KeyCode::Down); // symbol
+        press(&mut plain, KeyCode::Enter);
+        let shown = text(&plain, 130, 40);
+        assert!(shown.contains("記号の表示幅: 3"), "{shown}");
+        assert!(!shown.contains("注意:"), "{shown}");
+
+        // review の既定の記号 🐿 は、絵文字だが幅 1 と数える。注意が出る
+        let mut app = props_app("$review");
+        press(&mut app, KeyCode::Down); // symbol
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.picker.as_ref().unwrap().selected(), "🐿 ");
+        let shown = text(&app, 160, 40);
+        assert!(
+            shown.contains("記号の表示幅: 2（注意: 絵文字だが幅 1 と数える"),
+            "{shown}"
+        );
+        // 一覧にも、注意のある候補の印（`!`）が出る
+        assert!(shown.contains(" ! \"🐿␣\""), "{shown}");
+    }
+
+    #[test]
+    fn test_status_shows_the_width_while_typing_a_symbol() {
+        let mut app = props_app("$git_branch");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e'));
+        let shown = text(&app, 120, 40);
+        assert!(shown.contains("記号の表示幅: 3"), "{shown}");
+        // 入力でも、注意が出る（★ は East Asian Ambiguous）
+        press(&mut app, KeyCode::Char('★'));
+        let shown = text(&app, 160, 40);
+        assert!(shown.contains("East Asian Ambiguous"), "{shown}");
     }
 }

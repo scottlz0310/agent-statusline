@@ -5,6 +5,7 @@
 mod app;
 mod palette;
 mod storage;
+mod symbols;
 mod view;
 
 use std::io::{self, IsTerminal, Write};

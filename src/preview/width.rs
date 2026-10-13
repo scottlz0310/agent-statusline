@@ -50,6 +50,34 @@ pub fn display_width(text: &str) -> usize {
         .sum()
 }
 
+/// 記号の表示幅について、端末によって食い違いうる点の注意（なければ空）。
+/// `display_width` は `unicode-width` の見積もりで、実際の端末の描画と違うことがある
+pub fn symbol_notes(text: &str) -> Vec<&'static str> {
+    let mut notes = Vec::new();
+    if text.contains(['\u{fe0f}', '\u{fe0e}']) {
+        notes.push("異体字セレクタを含む（端末によって幅が変わる）");
+    }
+    if text.contains('\u{200d}') {
+        notes.push("ZWJ で結合した絵文字（端末によって分解されることがある）");
+    }
+    if text
+        .chars()
+        .any(|c| !c.is_control() && c.width() != c.width_cjk())
+    {
+        notes.push("East Asian Ambiguous（端末の設定によって、幅が 1 か 2 になる）");
+    }
+    // 絵文字として 2 セルで描かれるのに、幅 1 と数える文字（例: 🐿）。後ろの文字に食い込む。
+    // 異体字セレクタがあるときは、その注意に含める
+    if !text.contains('\u{fe0f}')
+        && text
+            .chars()
+            .any(|c| ('\u{1f000}'..='\u{1faff}').contains(&c) && c.width() == Some(1))
+    {
+        notes.push("絵文字だが幅 1 と数える（後ろの文字に食い込むことがある）");
+    }
+    notes
+}
+
 /// 現在有効な装飾。リセットで空になる
 #[derive(Default)]
 struct ActiveStyle(String);
@@ -123,6 +151,27 @@ pub fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_symbol_notes() {
+        // (名前, 記号, 期待する注意の数, 含まれる語)
+        let cases: [(&str, &str, usize, &str); 7] = [
+            ("ascii", "> ", 0, ""),
+            ("plain-emoji", "🌿 ", 0, ""),
+            ("squirrel-counts-as-width-1", "🐿 ", 1, "幅 1"),
+            ("ambiguous-star", "★ ", 1, "Ambiguous"),
+            ("variation-selector", "🛡\u{fe0f} ", 1, "異体字セレクタ"),
+            ("zwj", "👩\u{200d}💻", 1, "ZWJ"),
+            ("empty", "", 0, ""),
+        ];
+        for (name, text, count, word) in cases {
+            let notes = symbol_notes(text);
+            assert_eq!(notes.len(), count, "{name}: {notes:?}");
+            if count > 0 {
+                assert!(notes.iter().any(|n| n.contains(word)), "{name}: {notes:?}");
+            }
+        }
+    }
+
     use super::*;
 
     const BOLD: &str = "\x1b[1m";
