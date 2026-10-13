@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
 ### Added
 - **対話的な設定エディタ `agent-statusline config`** を追加。TOML を直接書かずに、プレビューを見ながら、配置・部品・設定を編集して保存できる。設計は [docs/agent-statusline-config-tui-design.md](docs/agent-statusline-config-tui-design.md)、使い方は README の「設定エディタ」を参照。
   - **プレビュー**: 実環境から独立したシナリオ（通常、長いパス・ブランチ、コンテキスト警告・上限間近、クォータ逼迫、レビュー待機・実行中、エージェント待機）で描画する。幅（auto / 80 / 120 / 160）、折り返し / 切り詰めを切り替えられる。プレビューと部品の表示例は、生の ANSI で端末へ直接出し、実際の `render` の出力と同じ色になる。`NO_COLOR` が設定されていても色つきで表示する。
