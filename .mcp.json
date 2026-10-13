@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "windows-mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["windows-mcp@0.8.7", "serve"],
+      "env": {}
+    }
+  }
+}
