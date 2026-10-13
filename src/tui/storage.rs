@@ -1,7 +1,7 @@
 //! 設定ファイルの保存と再読み込み。画面の状態遷移（`app`）が、ファイルシステムに直接触れないよう、
 //! トレイトの背後に置く（テストで差し替えられる）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::editor::load::{ConfigEnv, ConfigError, ConfigSource, LoadedConfig, load_config_strict};
 use crate::editor::save::{SaveEnv, SaveError, save};
@@ -13,24 +13,22 @@ pub trait Storage {
     /// 別のパスへ保存する。既にファイルがあれば、上書きせず `Conflict` を返す
     fn save_as(&self, path: &Path, text: &str) -> Result<ConfigSource, SaveError>;
 
-    /// 設定を読み込み直す。`path` は、読み込み済みのファイルのパス（なければ、起動時の指定と標準の探索）
-    fn reload(&self, path: Option<&Path>) -> Result<LoadedConfig, ConfigError>;
+    /// 設定を読み込み直す。`path` は、今の編集対象のパス（未作成のときは、保存先）。
+    /// 起動時の指定や標準の探索へは戻らない（別名で保存した後も、そのファイルを読む）
+    fn reload(&self, path: &Path) -> Result<LoadedConfig, ConfigError>;
 }
 
 /// 実際のファイルシステムへ保存する
 pub struct FileStorage {
     save_env: SaveEnv,
     config_env: ConfigEnv,
-    /// 起動時に指定された設定ファイルのパス（`--config`）
-    config_path: Option<PathBuf>,
 }
 
 impl FileStorage {
-    pub fn from_process(config_path: Option<&Path>) -> Self {
+    pub fn from_process() -> Self {
         Self {
             save_env: SaveEnv::from_process(),
             config_env: ConfigEnv::from_process(),
-            config_path: config_path.map(Path::to_path_buf),
         }
     }
 }
@@ -49,9 +47,8 @@ impl Storage for FileStorage {
         save(&source, text, &self.save_env)
     }
 
-    fn reload(&self, path: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
-        let path = path.or(self.config_path.as_deref());
-        load_config_strict(path, &self.config_env)
+    fn reload(&self, path: &Path) -> Result<LoadedConfig, ConfigError> {
+        load_config_strict(Some(path), &self.config_env)
     }
 }
 
@@ -65,7 +62,7 @@ mod tests {
     const TEXT: &str = "format = \"$model\"\n";
 
     /// 一時ディレクトリを、設定の探索と履歴の保存先にした `FileStorage`
-    fn storage(dir: &Path, config_path: Option<&Path>) -> FileStorage {
+    fn storage(dir: &Path) -> FileStorage {
         FileStorage {
             save_env: SaveEnv {
                 history_root: Some(dir.join("history")),
@@ -77,14 +74,13 @@ mod tests {
                 config_dir: Some(dir.join("config")),
                 home_dir: Some(dir.join("home")),
             },
-            config_path: config_path.map(Path::to_path_buf),
         }
     }
 
     #[test]
     fn test_save_as_creates_a_new_file_and_refuses_to_overwrite() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = storage(dir.path(), None);
+        let storage = storage(dir.path());
         let target = dir.path().join("out").join("a.toml");
 
         let source = storage.save_as(&target, TEXT).unwrap();
@@ -105,10 +101,10 @@ mod tests {
     #[test]
     fn test_save_writes_the_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = storage(dir.path(), None);
+        let storage = storage(dir.path());
         let path = dir.path().join("c.toml");
         std::fs::write(&path, "format = \"$plan\"\n").unwrap();
-        let loaded = storage.reload(Some(&path)).unwrap();
+        let loaded = storage.reload(&path).unwrap();
 
         let source = storage.save(&loaded.source, TEXT).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), TEXT);
@@ -116,19 +112,27 @@ mod tests {
     }
 
     #[test]
-    fn test_reload_prefers_the_given_path_then_the_startup_path() {
+    fn test_reload_reads_exactly_the_given_path() {
         let dir = tempfile::tempdir().unwrap();
-        let startup = dir.path().join("startup.toml");
-        let other = dir.path().join("other.toml");
-        std::fs::write(&startup, "format = \"$plan\"\n").unwrap();
-        std::fs::write(&other, "format = \"$model\"\n").unwrap();
-        let storage = storage(dir.path(), Some(&startup));
+        let a = dir.path().join("a.toml");
+        let b = dir.path().join("b.toml");
+        std::fs::write(&a, "format = \"$plan\"\n").unwrap();
+        std::fs::write(&b, "format = \"$model\"\n").unwrap();
+        let storage = storage(dir.path());
 
-        assert_eq!(
-            storage.reload(Some(&other)).unwrap().config.format,
-            "$model"
-        );
-        assert_eq!(storage.reload(None).unwrap().config.format, "$plan");
+        assert_eq!(storage.reload(&b).unwrap().config.format, "$model");
+        assert_eq!(storage.reload(&a).unwrap().config.format, "$plan");
+
+        // 削除されたファイルは、そのパスを保存先とする未作成として読む（別のファイルへ移らない）。
+        // 再び作られれば、そのパスの内容を読む
+        std::fs::remove_file(&b).unwrap();
+        let loaded = storage.reload(&b).unwrap();
+        assert!(matches!(
+            &loaded.source,
+            ConfigSource::Missing { target, .. } if target == &b
+        ));
+        std::fs::write(&b, "format = \"$quota\"\n").unwrap();
+        assert_eq!(storage.reload(&b).unwrap().config.format, "$quota");
     }
 }
 
@@ -150,7 +154,7 @@ pub mod fake {
         /// `save_as` で渡されたパスと TOML
         pub save_as: Vec<(PathBuf, String)>,
         /// `reload` で渡されたパス
-        pub reloads: Vec<Option<PathBuf>>,
+        pub reloads: Vec<PathBuf>,
         /// 次の `save` を失敗させる
         pub save_error: Option<SaveError>,
         /// 次の `save_as` を失敗させる
@@ -196,9 +200,9 @@ pub mod fake {
             Ok(existing(path, text))
         }
 
-        fn reload(&self, path: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+        fn reload(&self, path: &Path) -> Result<LoadedConfig, ConfigError> {
             let mut state = self.0.borrow_mut();
-            state.reloads.push(path.map(Path::to_path_buf));
+            state.reloads.push(path.to_path_buf());
             state.reload_to.take().ok_or(ConfigError::NoConfigDir)
         }
     }

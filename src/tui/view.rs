@@ -72,12 +72,14 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     let preview_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
 
     let props_height = u16::try_from(props_rows(app) + 2).unwrap_or(u16::MAX);
+    let status_rows = status_lines(app, usize::from(area.width));
+    let status_height = u16::try_from(status_rows.len()).unwrap_or(1);
     let [header, preview, middle, props, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(preview_height),
         Constraint::Min(3),
         Constraint::Length(props_height),
-        Constraint::Length(1),
+        Constraint::Length(status_height),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -102,7 +104,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     draw_layout(frame, app, editor, config, layout_area, columns);
     overlays.extend(draw_parts(frame, app, config, parts, columns));
     draw_props(frame, app, props);
-    frame.render_widget(status_line(app, usize::from(status.width)), status);
+    frame.render_widget(Paragraph::new(status_rows), status);
     frame.render_widget(
         Line::from(footer_text(app)).style(Style::default().add_modifier(Modifier::DIM)),
         footer,
@@ -444,30 +446,40 @@ fn input_spans(value: &str, cursor: usize, width: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// 状態行。優先順位は、(1) 別名で保存するパスの入力、(2) 確認・選択（未保存で終了、保存の競合）、
-/// (3) 入力中に受け付けられない値の理由、(4) 直前の操作が受け付けられなかった理由、(5) 直前の操作の知らせ、
-/// (6) 検証の結果（エラーと警告の件数と、先頭の 1 件）
-fn status_line(app: &App, width: usize) -> Line<'static> {
+/// 状態の行。別名で保存するパスの入力中は 2 行（上: 保存できなかった理由か案内、下: 入力）、
+/// それ以外は 1 行（`status_line`）。理由が入力欄に押し出されて、画面の外に切れないようにする
+fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(input) = &app.input else {
+        return vec![status_line(app)];
+    };
+    if input.target != InputTarget::SavePath {
+        return vec![status_line(app)];
+    }
+    let label = "別名で保存するパス: ";
+    let room = width.saturating_sub(display_width(label));
+    let mut spans = vec![Span::raw(label)];
+    spans.extend(input_spans(&input.value(), input.cursor(), room));
+    let first = match &app.message {
+        Some(message) => Line::from(Span::styled(
+            format!("受け付けられません: {message}"),
+            Style::default().fg(Color::Red),
+        )),
+        None => Line::from(Span::styled(
+            "保存先のパスを入力してください（既にあるファイルは上書きしません）",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    };
+    vec![first, Line::from(spans)]
+}
+
+/// 状態行。優先順位は、(1) 確認・選択（未保存で終了、保存の競合）、
+/// (2) 入力中に受け付けられない値の理由、(3) 直前の操作が受け付けられなかった理由、(4) 直前の操作の知らせ、
+/// (5) 検証の結果（エラーと警告の件数と、先頭の 1 件）
+fn status_line(app: &App) -> Line<'static> {
     let red = Style::default().fg(Color::Red);
     let yellow = Style::default().fg(Color::Yellow);
     let text = |text: String, style: Style| Line::from(Span::styled(text, style));
 
-    if let Some(input) = &app.input
-        && input.target == InputTarget::SavePath
-    {
-        let label = "別名で保存するパス: ";
-        let room = width.saturating_sub(display_width(label));
-        let mut spans = vec![Span::raw(label)];
-        spans.extend(input_spans(&input.value(), input.cursor(), room));
-        // 保存できなかった理由は、入力の右に出す代わりに、入力欄が狭くならないよう省く
-        return match &app.message {
-            Some(message) if display_width(message) + 1 < room => {
-                spans.push(Span::styled(format!(" {message}"), red));
-                Line::from(spans)
-            }
-            _ => Line::from(spans),
-        };
-    }
     match app.mode {
         Mode::ConfirmQuit => {
             return text(
@@ -1315,5 +1327,56 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("上書きしません"), "{shown}");
+    }
+
+    #[test]
+    fn test_save_path_error_is_visible_on_narrow_terminals_and_long_paths() {
+        // (名前, 端末の幅, 端末の高さ)
+        for (name, width) in [
+            ("80-columns", 80_u16),
+            ("120-columns", 120),
+            ("60-columns", 60),
+        ] {
+            let (mut app, storage) = storage_app("$model");
+            press(&mut app, KeyCode::Char('a'));
+            storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+            press(&mut app, KeyCode::Char('s'));
+            press(&mut app, KeyCode::Char('a'));
+
+            // 長いパスを足す
+            for _ in 0..3 {
+                for c in "/very/long/directory/name/that/does/not/fit".chars() {
+                    press(&mut app, KeyCode::Char(c));
+                }
+            }
+            storage.0.borrow_mut().save_as_error = Some(SaveError::Conflict(ConflictKind::Created));
+            press(&mut app, KeyCode::Enter);
+            assert!(app.input.is_some(), "{name}");
+
+            let shown = text(&app, width, 40);
+            // 失敗の理由と、入力（カーソルの `]`）の両方が、画面に出る
+            assert!(
+                shown.contains("上書きしません"),
+                "{name}: 理由が出ない\n{shown}"
+            );
+            assert!(shown.contains("別名で保存するパス: ["), "{name}\n{shown}");
+            assert!(
+                shown
+                    .lines()
+                    .any(|line| line.contains("別名で保存するパス: [") && line.contains(']')),
+                "{name}: 入力欄が閉じていない（カーソルが切れている）\n{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_path_hint_is_shown_before_any_error() {
+        let (mut app, storage) = storage_app("$model");
+        press(&mut app, KeyCode::Char('a'));
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("保存先のパスを入力してください"), "{shown}");
     }
 }

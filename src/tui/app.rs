@@ -417,9 +417,7 @@ impl App {
                 true
             }
             Err(SaveError::Conflict(_)) => {
-                self.message = Some(format!(
-                    "そのパスには、既にファイルがあるため、上書きしません: {path}"
-                ));
+                self.message = Some(format!("既にあるファイルは上書きしません: {path}"));
                 false
             }
             Err(err) => {
@@ -431,11 +429,9 @@ impl App {
 
     /// 設定ファイルを読み込み直す。**今の編集は破棄される**（競合の選択で、利用者が選んだとき）
     fn reload(&mut self) {
-        let path = match &self.source {
-            ConfigSource::Existing { path, .. } => Some(path.requested.clone()),
-            ConfigSource::Missing { .. } => None,
-        };
-        match self.storage.reload(path.as_deref()) {
+        // 未作成のときも、今の保存先を読む（起動時の指定へは戻らない）
+        let path = self.source_path().to_path_buf();
+        match self.storage.reload(&path) {
             Ok(loaded) => {
                 self.draft = Draft::new(loaded.config, loaded.document);
                 self.source = loaded.source;
@@ -1386,8 +1382,61 @@ mod tests {
         assert!(!app.draft.can_undo(), "履歴も新しくなる");
         assert!(app.notice.clone().unwrap().contains("再読み込みしました"));
         assert!(app.source_label().contains("reloaded.toml"));
-        // 未作成の設定ファイルから読み込むときは、パスを渡さない
-        assert_eq!(storage.0.borrow().reloads, [None]);
+        // 未作成のときも、今の保存先を渡す
+        assert_eq!(storage.0.borrow().reloads, [PathBuf::from("test.toml")]);
+    }
+
+    #[test]
+    fn test_reload_always_uses_the_current_path_even_after_save_as_and_deletion() {
+        let (mut app, storage) = app_with_storage("$model");
+        let conflict = |kind| Some(SaveError::Conflict(kind));
+        let missing = |path: &str| LoadedConfig {
+            config: Config::default(),
+            document: toml_edit::DocumentMut::new(),
+            source: ConfigSource::Missing {
+                target: PathBuf::from(path),
+                from_link: false,
+            },
+        };
+
+        // 起動時のパス（test.toml）で衝突 → 別名（test.toml.new）で保存する
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = conflict(ConflictKind::Changed);
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.source_label().contains("test.toml.new"));
+
+        // 別名のファイルが外部で削除された → 保存で衝突 → 再読み込み。未作成になり、保存先は別名のまま
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = conflict(ConflictKind::Deleted);
+            state.reload_to = Some(missing("test.toml.new"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert!(app.source_label().contains("未作成"));
+        assert!(app.source_label().contains("test.toml.new"));
+
+        // 外部で再作成された → 保存で衝突 → 再読み込み。起動時のパスへ戻らず、別名のパスを読む
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = conflict(ConflictKind::Created);
+            state.reload_to = Some(loaded("format = \"$plan\"\n"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            storage.0.borrow().reloads,
+            [
+                PathBuf::from("test.toml.new"),
+                PathBuf::from("test.toml.new")
+            ],
+            "どちらも、そのときの編集対象のパス"
+        );
+        assert_eq!(format(&app), "$plan");
     }
 
     #[test]

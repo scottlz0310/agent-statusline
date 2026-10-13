@@ -27,7 +27,7 @@ pub fn run(config_path: Option<&Path>) -> io::Result<()> {
     let loaded =
         load_config_strict(config_path, &ConfigEnv::from_process()).map_err(io::Error::other)?;
     let draft = Draft::new(loaded.config, loaded.document);
-    let storage = FileStorage::from_process(config_path);
+    let storage = FileStorage::from_process();
     let app = App::new(draft, loaded.source, Box::new(storage));
 
     enable_color_output();
