@@ -16,7 +16,7 @@ use crate::engine::parts::{PartSpec, PropKind, find};
 use crate::modules::directory::{MAX_PATH_LEN, MIN_PATH_LEN};
 use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
-use crate::tui::palette::{self, PaletteItem};
+use crate::tui::palette::{self, Category, PaletteItem};
 use crate::tui::storage::Storage;
 use crate::tui::symbols;
 
@@ -80,6 +80,8 @@ pub enum InputTarget {
     },
     /// 別名で保存するパス
     SavePath,
+    /// 部品一覧の検索語。入力中は、その内容で一覧を絞り込む
+    PartsSearch,
 }
 
 /// 文字列の入力。カーソルは、文字単位の位置（`0..=文字数`）
@@ -188,8 +190,13 @@ pub enum Mode {
 pub struct App {
     pub focus: Focus,
     pub draft: Draft,
+    /// 部品一覧の全項目（絞り込む前）
     pub palette: Vec<PaletteItem>,
+    /// 絞り込んだ一覧（`visible_palette`）の中での、選択位置
     palette_index: usize,
+    palette_category: Category,
+    /// 確定した検索語。空なら絞り込まない
+    palette_filter: String,
     props_index: usize,
     /// プロパティ欄の対象を、配置と部品一覧のどちらから決めるか。配置から `Tab` で入れば配置、
     /// 部品一覧から `BackTab` で入れば部品一覧
@@ -246,6 +253,8 @@ impl App {
             mode: Mode::Normal,
             palette: palette::items(),
             palette_index: 0,
+            palette_category: Category::All,
+            palette_filter: String::new(),
             props_index: 0,
             props_from: Focus::Layout,
             input: None,
@@ -259,12 +268,40 @@ impl App {
         }
     }
 
+    /// 絞り込んだ一覧の中での、選択位置
     pub fn palette_index(&self) -> usize {
         self.palette_index
     }
 
-    pub fn selected_item(&self) -> PaletteItem {
-        self.palette[self.palette_index]
+    pub fn palette_category(&self) -> Category {
+        self.palette_category
+    }
+
+    /// 一覧に使う検索語。検索語を入力中は入力欄の内容、そうでなければ確定した検索語
+    pub fn palette_query(&self) -> String {
+        match &self.input {
+            Some(input) if input.target == InputTarget::PartsSearch => input.value(),
+            _ => self.palette_filter.clone(),
+        }
+    }
+
+    /// カテゴリと検索語で絞り込んだ部品一覧
+    pub fn visible_palette(&self) -> Vec<PaletteItem> {
+        palette::visible(&self.palette, self.palette_category, &self.palette_query())
+    }
+
+    /// 選択中の項目。絞り込みの結果が空のときは `None`
+    pub fn selected_item(&self) -> Option<PaletteItem> {
+        self.visible_palette().get(self.palette_index).copied()
+    }
+
+    /// 絞り込み（カテゴリ・検索語）を変えた後、変える前に選んでいた項目が残っていればそれを、
+    /// 無ければ先頭を選ぶ
+    fn keep_palette_selection(&mut self, before: Option<PaletteItem>) {
+        let visible = self.visible_palette();
+        self.palette_index = before
+            .and_then(|item| visible.iter().position(|v| *v == item))
+            .unwrap_or(0);
     }
 
     /// 部品一覧にフォーカスがあるとき、選択中の項目を配置のカーソルの後ろに仮に入れた状態。
@@ -274,7 +311,7 @@ impl App {
             return None;
         }
         let mut editor = self.draft.layout().without_history();
-        palette::apply(self.selected_item(), &mut editor, Placement::After);
+        palette::apply(self.selected_item()?, &mut editor, Placement::After);
         Some(editor)
     }
 
@@ -285,7 +322,7 @@ impl App {
             || (self.focus == Focus::Props && self.props_from == Focus::Parts);
         if from_parts {
             match self.selected_item() {
-                PaletteItem::Part(id) => find(id),
+                Some(PaletteItem::Part(id)) => find(id),
                 _ => None,
             }
         } else {
@@ -411,6 +448,12 @@ impl App {
             return;
         }
         match key.code {
+            // 部品一覧で検索語が効いているときの `Esc` は、終了ではなく、検索の解除
+            KeyCode::Esc if self.focus == Focus::Parts && !self.palette_filter.is_empty() => {
+                let before = self.selected_item();
+                self.palette_filter.clear();
+                self.keep_palette_selection(before);
+            }
             KeyCode::Char('q') | KeyCode::Esc => {
                 if self.is_dirty() {
                     self.mode = Mode::ConfirmQuit;
@@ -626,21 +669,41 @@ impl App {
         }
     }
 
-    /// `Enter` は選択中のトークンの後ろへ、`i` は前へ追加する
+    /// `↑↓` で選び、`←→` でカテゴリを切り替え、`/` で検索する。
+    /// `Enter` は選択中のトークンの後ろへ、`i` は前へ追加する（絞り込みの結果が空のときは何もしない）
     fn handle_parts_key(&mut self, key: KeyCode) {
-        let item = self.selected_item();
+        let before = self.selected_item();
         match key {
             KeyCode::Up => self.palette_index = self.palette_index.saturating_sub(1),
             KeyCode::Down => {
-                self.palette_index = (self.palette_index + 1).min(self.palette.len() - 1);
+                let last = self.visible_palette().len().saturating_sub(1);
+                self.palette_index = (self.palette_index + 1).min(last);
+            }
+            KeyCode::Left | KeyCode::Right => {
+                self.palette_category = if key == KeyCode::Right {
+                    self.palette_category.next()
+                } else {
+                    self.palette_category.previous()
+                };
+                self.keep_palette_selection(before);
+            }
+            KeyCode::Char('/') => {
+                self.input = Some(TextInput::new(
+                    InputTarget::PartsSearch,
+                    &self.palette_filter,
+                ));
             }
             KeyCode::Enter => {
-                self.draft
-                    .edit_layout(|e| palette::apply(item, e, Placement::After));
+                if let Some(item) = before {
+                    self.draft
+                        .edit_layout(|e| palette::apply(item, e, Placement::After));
+                }
             }
             KeyCode::Char('i') => {
-                self.draft
-                    .edit_layout(|e| palette::apply(item, e, Placement::Before));
+                if let Some(item) = before {
+                    self.draft
+                        .edit_layout(|e| palette::apply(item, e, Placement::Before));
+                }
             }
             _ => {}
         }
@@ -727,12 +790,32 @@ impl App {
     }
 
     fn handle_input_key(&mut self, key: KeyEvent) {
+        // 部品一覧の検索は、入力のたびに一覧が絞り込まれる。選んでいた項目が残っていれば、選び続ける
+        let searching = self
+            .input
+            .as_ref()
+            .is_some_and(|input| input.target == InputTarget::PartsSearch);
+        let before = if searching {
+            self.selected_item()
+        } else {
+            None
+        };
         let Some(input) = self.input.as_mut() else {
             return;
         };
         match key.code {
-            KeyCode::Esc => self.input = None,
+            KeyCode::Esc => {
+                self.input = None;
+                if searching {
+                    // 検索を取り消すと、絞り込みも解く
+                    self.palette_filter.clear();
+                }
+            }
             KeyCode::Enter => match input.target {
+                InputTarget::PartsSearch => {
+                    self.palette_filter = input.value().trim().to_string();
+                    self.input = None;
+                }
                 InputTarget::Prop { part, key } => {
                     let value = PropValue::Str(input.value());
                     // 受け付けられないときは、入力を続けて、理由を示す
@@ -762,6 +845,9 @@ impl App {
             KeyCode::Home => input.cursor = 0,
             KeyCode::End => input.cursor = input.chars.len(),
             _ => {}
+        }
+        if searching {
+            self.keep_palette_selection(before);
         }
     }
 }
@@ -926,7 +1012,7 @@ mod tests {
 
     /// 部品一覧の `target` の項目まで、`Down` で進める
     fn select_item(app: &mut App, target: PaletteItem) {
-        while app.selected_item() != target {
+        while app.selected_item() != Some(target) {
             press(app, KeyCode::Down);
         }
     }
@@ -940,7 +1026,160 @@ mod tests {
             press(&mut app, KeyCode::Down);
         }
         assert_eq!(app.palette_index(), app.palette.len() - 1);
-        assert_eq!(app.selected_item(), PaletteItem::LineBreak);
+        assert_eq!(app.selected_item(), Some(PaletteItem::LineBreak));
+    }
+
+    fn visible_ids(app: &App) -> Vec<String> {
+        app.visible_palette()
+            .into_iter()
+            .map(palette::label)
+            .collect()
+    }
+
+    #[test]
+    fn test_parts_category_keys_filter_the_list_and_wrap_around() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        assert_eq!(app.palette_category(), Category::All);
+        assert_eq!(app.visible_palette().len(), app.palette.len());
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.palette_category(), Category::Workspace);
+        assert_eq!(visible_ids(&app), ["directory", "git_branch", "git_status"]);
+        // 絞り込んだ一覧の先頭が選ばれ、Enter で追加するのは、その項目
+        assert_eq!(app.palette_index(), 0);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(format(&app), "$directory$git_branch");
+
+        // 末尾の次は先頭（すべて）、先頭の前は末尾（レイアウト）
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.palette_category(), Category::All);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.palette_category(), Category::Layout);
+        assert_eq!(app.selected_item(), Some(PaletteItem::Literal(" ")));
+        assert_eq!(app.visible_palette().len(), 5);
+    }
+
+    #[test]
+    fn test_changing_the_category_keeps_the_selected_item_when_it_stays_visible() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        select_item(&mut app, PaletteItem::Part("quota"));
+        // すべて → 作業場所・Git: quota は消えるので先頭になる
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.selected_item(), Some(PaletteItem::Part("directory")));
+        // エージェントへ: 先頭
+        press(&mut app, KeyCode::Right);
+        select_item(&mut app, PaletteItem::Part("quota"));
+        // エージェント → レビュー → ... → すべて と戻っても、quota は残らないが、
+        // エージェント → すべて（前へ 2 回）では quota が見えるので選び続ける
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.palette_category(), Category::All);
+        assert_eq!(app.selected_item(), Some(PaletteItem::Part("directory")));
+    }
+
+    #[test]
+    fn test_parts_search_filters_live_and_confirms_with_enter() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        press(&mut app, KeyCode::Char('/'));
+        let input = app.input.as_ref().expect("検索の入力が始まる");
+        assert_eq!(input.target, InputTarget::PartsSearch);
+        assert_eq!(input.value(), "");
+
+        // 入力のたびに一覧が絞り込まれる。`q` や `u` や `v` も文字（終了も元に戻すも検証結果も開かない）
+        type_text(&mut app, "GIT");
+        assert_eq!(visible_ids(&app), ["git_branch", "git_status"]);
+        type_text(&mut app, "q");
+        assert_eq!(app.visible_palette(), Vec::new());
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(visible_ids(&app), ["git_branch", "git_status"]);
+        // 下書きは、確定するまで変わらない
+        assert_eq!(format(&app), "$directory");
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none());
+        assert_eq!(visible_ids(&app), ["git_branch", "git_status"]);
+        // 確定した検索語は、カテゴリと組み合わさる
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.palette_category(), Category::Agent);
+        assert_eq!(app.visible_palette(), Vec::new());
+        press(&mut app, KeyCode::Left);
+        assert_eq!(visible_ids(&app), ["git_branch", "git_status"]);
+    }
+
+    #[test]
+    fn test_parts_search_keeps_the_selected_item_while_typing() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        select_item(&mut app, PaletteItem::Part("git_status"));
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "git");
+        // git_status は絞り込みの後も見えるので、選び続ける
+        assert_eq!(app.selected_item(), Some(PaletteItem::Part("git_status")));
+        type_text(&mut app, "_b");
+        // git_status が消えたら、先頭
+        assert_eq!(app.selected_item(), Some(PaletteItem::Part("git_branch")));
+    }
+
+    #[test]
+    fn test_parts_search_esc_clears_the_filter_and_esc_with_a_filter_does_not_quit() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "git");
+        // 入力中の Esc は、検索を取り消して、絞り込みを解く
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_none());
+        assert_eq!(app.visible_palette().len(), app.palette.len());
+
+        // 確定した検索語がある間の Esc は、終了ではなく検索の解除
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "git");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.visible_palette().len(), 2);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.should_quit);
+        assert_eq!(app.visible_palette().len(), app.palette.len());
+        // 解除した後の Esc は、これまでどおり終了
+        press(&mut app, KeyCode::Esc);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_parts_search_with_no_match_is_inert_and_does_not_panic() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "zzz");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.visible_palette(), Vec::new());
+        assert_eq!(app.selected_item(), None);
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Char('i'),
+        ] {
+            press(&mut app, key);
+        }
+        assert_eq!(format(&app), "$directory", "何も追加されない");
+        assert_eq!(app.tentative_editor().map(|e| e.layout().to_format()), None);
+        assert!(app.target_part().is_none());
+        // 検索を解除すると、元の一覧に戻る
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.visible_palette().len(), app.palette.len());
+        assert_eq!(app.palette_index(), 0);
+    }
+
+    #[test]
+    fn test_parts_search_and_category_keys_only_work_on_the_parts_list() {
+        for focus in [Focus::Layout, Focus::Preview] {
+            let mut app = app_with_focus("$directory", focus);
+            press(&mut app, KeyCode::Char('/'));
+            assert!(app.input.is_none(), "{focus:?}");
+            assert_eq!(app.palette_category(), Category::All, "{focus:?}");
+        }
     }
 
     #[test]
