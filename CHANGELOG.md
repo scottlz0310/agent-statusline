@@ -10,8 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.1] - 2026-10-17
 
 ### Added
-- `[quota] hide_zero` オプションを追加。`true` に設定すると使用率が 0% のクォータ項目を非表示にする。設定エディタ（`agent-statusline config`）でのトグル編集およびバリデーションにも対応。
-- Antigravity CLI の Argon クォータ（`gemini-argon-wtu-weekly`）のラベル短縮（`Argon Wk`）と優先表示順序の定義を追加。
+- `[quota] hide_zero` オプションを追加。`true` に設定すると使用率が 0% のクォータ項目を非表示にする。設定エディタ（`agent-statusline config`）でのトグル編集およびバリデーションにも対応 (#71)。
+- Antigravity CLI の Argon クォータ（`gemini-argon-wtu-weekly`）のラベル短縮（`Argon Wk`）と優先表示順序の定義を追加 (#71)。
+
+### Changed
+- README の `cargo install` 例を、このリリースの `v0.4.1` に更新。
 
 ## [0.4.0] - 2026-10-13
 

@@ -60,9 +60,9 @@
 
 ## レートリミット表示の改善
 
-- [x] Antigravity の Argon クォータ (`gemini-argon-wtu-weekly`) の表示順序とラベルマッピング (`Argon Wk`) を追加
-- [x] `[quota] hide_zero` 設定の実装（使用率 0% のクォータ項目を非表示化）と設定 TUI・バリデーション連携
-
+- [x] Antigravity の Argon クォータ (`gemini-argon-wtu-weekly`) の表示順序とラベルマッピング (`Argon Wk`) を追加 (#71)
+- [x] `[quota] hide_zero` 設定の実装（使用率 0% のクォータ項目を非表示化）と設定 TUI・バリデーション連携 (#71)
+- [x] v0.4.1 リリース
 
 ## 設定 TUI (`agent-statusline config`)
 
