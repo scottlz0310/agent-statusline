@@ -43,9 +43,11 @@ panic の確認は、対照実験で方法の妥当性を担保した。`SIGKILL
 
 ## 確認できなかった項目
 
+GNOME Terminal は自律的に操作できないため、確認の対象から外した（`xterm` の確認だけで完了とした）。問題が報告されたら、別 Issue で扱う。
+
 - GNOME Terminal 固有の見え方（`blue` の見本の濃さ、絵文字の幅）。端末は `xterm` のみ。
 - `Shift` でのテキスト選択の、GNOME Terminal での動き。
-- IME の変換ウィンドウの位置（[#94](https://github.com/scottlz0310/agent-statusline/issues/94)）。Xvfb では確認できない。
+- IME の変換ウィンドウの位置（[#94](https://github.com/scottlz0310/agent-statusline/issues/94)）。Xvfb では確認できない（Windows Terminal と VS Code では、修正後に入力欄の位置に出ることを確認した）。
 
 ## 確認の方法についての注記
 
