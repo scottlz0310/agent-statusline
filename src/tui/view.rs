@@ -101,12 +101,17 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     );
 
     let mut overlays = vec![draw_preview(frame, app, preview, &lines, columns, too_wide)];
-    draw_layout(frame, app, editor, config, layout_area, columns);
-    if app.picker.is_some() {
-        // 記号の候補を選んでいる間は、部品一覧の場所に候補を出す（部品の表示例の生 ANSI と重ならない）
-        draw_picker(frame, app, parts);
+    if app.issues_view.is_some() {
+        // 検証結果の一覧は、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
+        draw_issues(frame, app, middle);
     } else {
-        overlays.extend(draw_parts(frame, app, config, parts, columns));
+        draw_layout(frame, app, editor, config, layout_area, columns);
+        if app.picker.is_some() {
+            // 記号の候補を選んでいる間は、部品一覧の場所に候補を出す（部品の表示例の生 ANSI と重ならない）
+            draw_picker(frame, app, parts);
+        } else {
+            overlays.extend(draw_parts(frame, app, config, parts, columns));
+        }
     }
     draw_props(frame, app, props);
     frame.render_widget(Paragraph::new(status_rows), status);
@@ -131,19 +136,22 @@ fn footer_text(app: &App) -> &'static str {
     if app.picker.is_some() {
         return "記号を選ぶ  ↑↓: 選ぶ  Enter: 決定  e: 自由に入力  Esc: 閉じる";
     }
+    if app.issues_view.is_some() {
+        return "検証結果  ↑↓: 選ぶ  Esc / v: 閉じる";
+    }
     // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
         Focus::Layout => {
-            "s: 保存  q: 終了  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
+            "s: 保存  q: 終了  v: 検証結果  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
         }
         Focus::Parts => {
-            "s: 保存  q: 終了  Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す"
+            "s: 保存  q: 終了  v: 検証結果  Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す"
         }
         Focus::Props => {
-            "s: 保存  q: 終了  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
+            "s: 保存  q: 終了  v: 検証結果  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
         }
         Focus::Preview => {
-            "s: 保存  q: 終了  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
+            "s: 保存  q: 終了  v: 検証結果  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
         }
     }
 }
@@ -546,13 +554,103 @@ fn status_line(app: &App) -> Line<'static> {
         format!("{}: ", first.path)
     };
     let style = if errors > 0 { red } else { yellow };
+    // 先頭の 1 件しか出ないので、ほかにもあるときは、全件を見る方法を添える
+    let more = if issues.len() > 1 {
+        "（v: 全件を表示）"
+    } else {
+        ""
+    };
     text(
         format!(
-            "検証: エラー {errors} 件 / 警告 {warnings} 件 — {location}{}",
+            "検証: エラー {errors} 件 / 警告 {warnings} 件{more} — {location}{}",
             first.message
         ),
         style,
     )
+}
+
+/// 検証結果の一覧の、行頭の印（`▶ ` など）の表示幅
+const ISSUE_MARKER_WIDTH: usize = 2;
+
+/// 検証結果の一覧。エラーを先に、続けて警告を出し、長いメッセージは折り返す。
+/// メッセージには設定ファイルの文字列が含まれるので、制御文字は無害な文字に置き換える
+fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = &app.issues_view else {
+        return;
+    };
+    let mut issues = app.draft.issues();
+    issues.sort_by_key(|issue| issue.severity != Severity::Error);
+    let errors = issues
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .count();
+    let block = focus_block(
+        format!(
+            " 検証結果 ─ エラー {errors} 件 / 警告 {} 件 ",
+            issues.len() - errors
+        ),
+        true,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if issues.is_empty() {
+        frame.render_widget(Paragraph::new("問題はありません"), inner);
+        return;
+    }
+
+    let text_width = usize::from(inner.width).saturating_sub(ISSUE_MARKER_WIDTH);
+    let selected = view.index().min(issues.len() - 1);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut selected_rows = 0..0;
+    for (index, issue) in issues.iter().enumerate() {
+        let (label, color) = match issue.severity {
+            Severity::Error => ("エラー", Color::Red),
+            Severity::Warning => ("警告", Color::Yellow),
+        };
+        let location = if issue.path.is_empty() {
+            String::new()
+        } else {
+            format!("{}: ", issue.path)
+        };
+        let message: String = format!("{label} {location}{}", issue.message)
+            .chars()
+            .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+            .collect();
+        let start = lines.len();
+        let mut style = Style::default().fg(color);
+        if index == selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        for (row, part) in fit_line(&message, text_width, Overflow::Wrap)
+            .into_iter()
+            .enumerate()
+        {
+            let marker = if index == selected && row == 0 {
+                "▶ "
+            } else {
+                "  "
+            };
+            lines.push(Line::from(vec![
+                Span::raw(marker),
+                Span::styled(part, style),
+            ]));
+        }
+        if index == selected {
+            selected_rows = start..lines.len();
+        }
+    }
+
+    // 選んでいる項目が全部見える位置までスクロールする（収まらないときは、先頭の行を優先する）
+    let height = usize::from(inner.height);
+    let offset = selected_rows
+        .end
+        .saturating_sub(height)
+        .min(selected_rows.start);
+    let visible: Vec<Line> = lines.into_iter().skip(offset).take(height).collect();
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 /// 記号の表示幅と、端末によって食い違いうる点の注意（状態行用）
@@ -970,6 +1068,122 @@ mod tests {
         }
     }
 
+    /// 設定の文字列から、検証結果を持つアプリを作る
+    fn app_from_toml(toml: &str) -> App {
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        App::for_test(Draft::new(config, toml.parse().unwrap()))
+    }
+
+    /// 認識できないテーブルが `count` 個ある設定（`unknown00`, `unknown01`, ...）
+    fn unknown_tables(count: usize) -> String {
+        use std::fmt::Write;
+        (0..count).fold(String::new(), |mut toml, i| {
+            write!(toml, "[unknown{i:02}]\nx = 1\n").unwrap();
+            toml
+        })
+    }
+
+    #[test]
+    fn test_issues_view_lists_every_issue_errors_first() {
+        let toml = "[directory]\nsymbl = \"x\"\n\n[nothing]\nx = 1\n\n[model]\nstyle = \"cyna\"\n";
+        let mut app = app_from_toml(toml);
+        // 状態行は先頭の 1 件だけなので、全件を見る方法を添える
+        assert!(text(&app, 130, 40).contains("警告 2 件（v: 全件を表示）"));
+
+        press(&mut app, KeyCode::Char('v'));
+        let (screen, overlays) = render(&app, 100, 40);
+        let shown = screen.join("\n");
+        for expected in [
+            "検証結果 ─ エラー 1 件 / 警告 2 件",
+            "model.style: 認識できないスタイル名: cyna",
+            "directory.symbl: 認識できないキーです",
+            "nothing: 認識できないキーまたはテーブルです",
+            "Esc / v: 閉じる",
+        ] {
+            assert!(shown.contains(expected), "{expected} がない\n{shown}");
+        }
+        let row = |needle: &str| {
+            screen
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap()
+        };
+        assert!(
+            row("エラー model.style") < row("警告 directory.symbl"),
+            "{shown}"
+        );
+        assert!(row("警告 directory.symbl") < row("警告 nothing"), "{shown}");
+        // 選んでいる項目に印を付ける
+        assert!(
+            screen[row("エラー model.style")].contains("▶ エラー"),
+            "{shown}"
+        );
+        // 一覧の間は、配置・部品一覧と、部品の表示例（生 ANSI）を出さない
+        assert!(!shown.contains("この行は出力されません"), "{shown}");
+        assert_eq!(overlays.len(), 1, "プレビューだけ");
+
+        press(&mut app, KeyCode::Down);
+        let shown = text(&app, 100, 40);
+        assert!(shown.contains("▶ 警告 directory.symbl"), "{shown}");
+    }
+
+    #[test]
+    fn test_issues_view_without_issues_and_with_a_single_issue() {
+        let mut app = new_app();
+        press(&mut app, KeyCode::Char('v'));
+        assert!(text(&app, 100, 30).contains("問題はありません"));
+
+        // 1 件だけなら、全件を見る案内は要らない
+        let app = app_from_toml("[nothing]\nx = 1\n");
+        assert!(!text(&app, 130, 40).contains("v: 全件を表示"));
+    }
+
+    #[test]
+    fn test_issues_view_scrolls_to_keep_the_selection_visible() {
+        let toml = unknown_tables(30);
+        let mut app = app_from_toml(&toml);
+        press(&mut app, KeyCode::Char('v'));
+        let first = text(&app, 100, 24);
+        assert!(first.contains("▶ 警告 unknown00"), "{first}");
+        assert!(!first.contains("unknown29"), "{first}");
+
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Down);
+        }
+        let last = text(&app, 100, 24);
+        assert!(last.contains("▶ 警告 unknown29"), "{last}");
+        // 一覧は末尾へスクロールした（状態行には、先頭の問題が出続ける）
+        assert!(!last.contains("警告 unknown00"), "{last}");
+    }
+
+    #[test]
+    fn test_issues_view_wraps_long_messages_and_neutralizes_control_characters() {
+        let toml = "[model]\nstyle = \"bold cyan nosuchstyleaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n";
+        let mut app = app_from_toml(toml);
+        press(&mut app, KeyCode::Char('v'));
+        let shown = text(&app, 60, 30);
+        // 折り返されても、末尾まで見える
+        assert!(shown.contains("aaaaa"), "{shown}");
+        assert!(shown.matches("aaaa").count() >= 2, "折り返される\n{shown}");
+
+        let app = app_from_toml("[\"evil\\u001b[31mred\"]\nx = 1\n");
+        let mut app = app;
+        press(&mut app, KeyCode::Char('v'));
+        let shown = text(&app, 80, 20);
+        assert!(!shown.contains('\u{1b}'), "{shown:?}");
+        assert!(shown.contains("evil"), "{shown}");
+    }
+
+    #[test]
+    fn test_issues_view_survives_tiny_terminals() {
+        let toml = unknown_tables(5);
+        let mut app = app_from_toml(&toml);
+        press(&mut app, KeyCode::Char('v'));
+        for (width, height) in [(1, 1), (3, 3), (10, 5), (20, 8), (40, 12)] {
+            let _ = render(&app, width, height);
+        }
+    }
+
     #[test]
     fn test_draw_layout_shows_tokens_and_hidden_notes() {
         let mut app = app_with_focus("$directory | $review\n\n$review", Focus::Layout);
@@ -1181,7 +1395,7 @@ mod tests {
         // エラーを先に出す
         assert!(
             shown.contains(
-                "検証: エラー 1 件 / 警告 1 件 — model.style: 認識できないスタイル名: cyna"
+                "検証: エラー 1 件 / 警告 1 件（v: 全件を表示） — model.style: 認識できないスタイル名: cyna"
             ),
             "{shown}"
         );

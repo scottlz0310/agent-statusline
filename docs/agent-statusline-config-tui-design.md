@@ -168,7 +168,7 @@ Token  = Part(id) | Literal(String)
 | 触れていない項目 | コメント、並び、未知のキーを含め、そのまま残す |
 
 - `format` の書き方（`"""` の複数行か、`\n` を含む 1 行か）は、元の表現を引き継ぐ。引き継げない場合は、既定の README 例と同じ複数行形式で書く。
-- 未認識のキー（`symbl` のような綴りの誤りを含む）は、`Config` が `deny_unknown_fields` ではないため、CLI は無視する。TUI は、レジストリと照合して警告として示す。書き換えはしない。
+- 未認識のキー（`symbl` のような綴りの誤りを含む）は、`Config` が `deny_unknown_fields` ではないため、CLI は無視する。TUI は、レジストリと照合して警告として示す。書き換えはしない。状態行には先頭の 1 件だけが出るので、`v` で検証結果（エラーと警告）の全件を一覧にする（フェーズ 2、`↑↓` で選び、`Esc` / `v` で閉じる）。
 - 保存前に、(1) 再解析できること、(2) `Config` として読めること、(3) 閾値の範囲（`threshold_warning < threshold_critical` など）、(4) スタイル名が `parse_style_tokens` で認識できること、を検証する。
 - スタイル指定（`parse_style_tokens`）は、現在 16 色の名前と `bold`・`dimmed`・`italic`・`underline`・`inverted` に限られる。256 色や RGB への拡張は、エンジンの変更を伴うので、本設計の範囲外とする。
 
@@ -221,7 +221,7 @@ Token  = Part(id) | Literal(String)
 │ symbol 🌿 [絵文字を選ぶ]   style green [色を選ぶ]   disabled ☐         │
 │ format [$symbol$branch]($style)  ← 詳細（変数の補完と検証つき）         │
 └──────────────────────────────────────────────────────────────────────┘
- Tab:移動  Enter:後ろに追加  i:前に追加  Shift+矢印:順序  d:削除  u:元に戻す  t:TOML  s:保存  ?:ヘルプ
+ Tab:移動  Enter:後ろに追加  i:前に追加  Shift+矢印:順序  d:削除  u:元に戻す  v:検証結果  t:TOML  s:保存  ?:ヘルプ
 ```
 
 - プレビューは常に最上部に置き、操作の結果が即座に見えるようにする。

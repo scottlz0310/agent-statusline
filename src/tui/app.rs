@@ -149,6 +149,18 @@ impl Picker {
     }
 }
 
+/// 検証結果（エラー・警告）の一覧の表示。`v` で開く。状態行には先頭の 1 件しか出ないので、全件を見るために使う
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IssuesView {
+    index: usize,
+}
+
+impl IssuesView {
+    pub fn index(self) -> usize {
+        self.index
+    }
+}
+
 /// 画面の下に出す確認・選択の状態。`Normal` 以外のとき、キーはその選択に使われる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -171,6 +183,8 @@ pub struct App {
     pub input: Option<TextInput>,
     /// 記号の候補の選択（開いているとき）
     pub picker: Option<Picker>,
+    /// 検証結果の一覧（開いているとき）
+    pub issues_view: Option<IssuesView>,
     /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
     pub message: Option<String>,
     /// 直前の操作の結果の知らせ（保存した、など。次のキー入力で消える）
@@ -222,6 +236,7 @@ impl App {
             props_from: Focus::Layout,
             input: None,
             picker: None,
+            issues_view: None,
             message: None,
             scenario_index: 0,
             width_index: 0,
@@ -373,6 +388,10 @@ impl App {
             self.handle_picker_key(key.code);
             return;
         }
+        if self.issues_view.is_some() {
+            self.handle_issues_key(key.code);
+            return;
+        }
         if self.mode != Mode::Normal {
             self.handle_mode_key(key.code);
             return;
@@ -391,6 +410,7 @@ impl App {
             KeyCode::Tab => self.set_focus(self.focus.next()),
             KeyCode::BackTab => self.set_focus(self.focus.previous()),
             KeyCode::Char('u') => self.draft.undo(),
+            KeyCode::Char('v') => self.issues_view = Some(IssuesView::default()),
             code => match self.focus {
                 Focus::Preview => self.handle_preview_key(code),
                 Focus::Layout => self.handle_layout_key(code, key.modifiers),
@@ -422,6 +442,20 @@ impl App {
                     Err(err) => self.message = Some(err.to_string()),
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// 検証結果の一覧のキー。`↑↓` で選び、`Esc` / `v` で閉じる
+    fn handle_issues_key(&mut self, key: KeyCode) {
+        let last = self.draft.issues().len().saturating_sub(1);
+        let Some(view) = self.issues_view.as_mut() else {
+            return;
+        };
+        match key {
+            KeyCode::Up => view.index = view.index.saturating_sub(1),
+            KeyCode::Down => view.index = (view.index + 1).min(last),
+            KeyCode::Esc | KeyCode::Char('v') => self.issues_view = None,
             _ => {}
         }
     }
@@ -1437,6 +1471,51 @@ mod tests {
         assert!(app.message.clone().unwrap().contains("履歴の保存先"));
         assert!(app.is_dirty());
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn test_issues_view_opens_scrolls_and_closes() {
+        let toml = "[nothing]\nx = 1\n\n[other]\nx = 1\n";
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let mut app = App::for_test(Draft::new(config, toml.parse().unwrap()));
+        assert_eq!(app.issues_view, None);
+
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        // 一覧が開いている間は、`q` も `s` も `u` も効かない（終了も保存もしない）
+        for key in [KeyCode::Char('q'), KeyCode::Char('s'), KeyCode::Char('u')] {
+            press(&mut app, key);
+            assert!(!app.should_quit);
+            assert_eq!(app.mode, Mode::Normal);
+            assert!(app.issues_view.is_some());
+        }
+        // 範囲の外へは進まない
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.issues_view.map(IssuesView::index), Some(1));
+
+        // `Esc` で閉じる（終了しない）。もう一度 `v` で開くと、先頭から
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.issues_view, None);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.issues_view, None);
+    }
+
+    #[test]
+    fn test_v_is_a_character_while_typing() {
+        let mut app = props_app("model");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter); // 記号は、候補の一覧が開く
+        press(&mut app, KeyCode::Char('e')); // 自由に入力する
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.issues_view, None);
+        assert!(app.input.as_ref().unwrap().value().ends_with('v'));
     }
 
     #[test]
