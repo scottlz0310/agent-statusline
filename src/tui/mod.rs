@@ -9,13 +9,16 @@ mod symbols;
 mod view;
 
 use std::io::{self, IsTerminal, Write};
+use std::panic;
 use std::path::Path;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::MoveTo;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
-use ratatui::crossterm::queue;
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
 use ratatui::crossterm::style::Print;
+use ratatui::crossterm::{execute, queue};
 
 use crate::editor::draft::Draft;
 use crate::editor::load::{ConfigEnv, load_config_strict};
@@ -23,7 +26,8 @@ use app::App;
 use storage::FileStorage;
 use view::{RawOverlay, draw};
 
-pub fn run(config_path: Option<&Path>) -> io::Result<()> {
+/// `mouse` が偽のときは、マウスを使わない（端末のテキスト選択が、そのまま使える）
+pub fn run(config_path: Option<&Path>, mouse: bool) -> io::Result<()> {
     ensure_interactive(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let loaded =
         load_config_strict(config_path, &ConfigEnv::from_process()).map_err(io::Error::other)?;
@@ -33,9 +37,45 @@ pub fn run(config_path: Option<&Path>) -> io::Result<()> {
 
     enable_color_output();
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, app);
+    // マウスのキャプチャは、`ratatui::restore` より前に解除する（エラーの戻りでも、`Drop` で解除される）
+    let capture = if mouse {
+        MouseCapture::enable().map(Some)
+    } else {
+        Ok(None)
+    };
+    let result = capture.and_then(|capture| {
+        let result = event_loop(&mut terminal, app);
+        drop(capture);
+        result
+    });
     ratatui::restore();
     result
+}
+
+/// 端末のマウスのキャプチャを、有効にしている間だけ持つ。`Drop` と panic フックで、必ず解除する
+/// （リリースビルドは `panic = "abort"` で `Drop` が走らないので、panic フックでも解除する）
+struct MouseCapture;
+
+impl MouseCapture {
+    fn enable() -> io::Result<Self> {
+        execute!(io::stdout(), EnableMouseCapture)?;
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let _ = disable_mouse_capture();
+            previous(info);
+        }));
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCapture {
+    fn drop(&mut self) {
+        let _ = disable_mouse_capture();
+    }
+}
+
+fn disable_mouse_capture() -> io::Result<()> {
+    execute!(io::stdout(), DisableMouseCapture)
 }
 
 /// プレビューは、`NO_COLOR` が設定されていても色つきで出す。
@@ -67,10 +107,10 @@ fn event_loop(terminal: &mut DefaultTerminal, mut app: App) -> io::Result<()> {
         }
 
         // Windows ではキーの押下と解放の両方が届くので、押下だけを扱う
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            _ => {}
         }
     }
     Ok(())
@@ -105,6 +145,36 @@ mod tests {
         enable_color_output();
         let sequence = Colored::ForegroundColor(Color::DarkCyan).to_string();
         assert!(!sequence.is_empty(), "色の指定が出力されない");
+    }
+
+    #[test]
+    fn test_config_subcommand_accepts_no_mouse() {
+        use clap::Parser;
+
+        use crate::cli::{Cli, Commands};
+
+        // (引数, 期待する no_mouse)
+        let cases = [
+            (vec!["agent-statusline", "config"], false),
+            (vec!["agent-statusline", "config", "--no-mouse"], true),
+            (
+                vec![
+                    "agent-statusline",
+                    "config",
+                    "--config",
+                    "c.toml",
+                    "--no-mouse",
+                ],
+                true,
+            ),
+        ];
+        for (args, expected) in cases {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            let Commands::Config { no_mouse, .. } = cli.command else {
+                panic!("config サブコマンド: {args:?}");
+            };
+            assert_eq!(no_mouse, expected, "{args:?}");
+        }
     }
 
     #[test]

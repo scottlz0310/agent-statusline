@@ -34,6 +34,10 @@ pub enum Commands {
         /// Path to custom config file
         #[arg(short, long)]
         config: Option<std::path::PathBuf>,
+
+        /// Disable mouse support (keeps the terminal's own text selection)
+        #[arg(long)]
+        no_mouse: bool,
     },
 
     /// Automatically install statusline into agent settings

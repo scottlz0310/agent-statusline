@@ -18,7 +18,10 @@ use crate::engine::config::Config;
 use crate::engine::parts::PropKind;
 use crate::preview::width::{Overflow, display_width, fit_line, symbol_notes};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
-use crate::tui::app::{App, DiffBase, Focus, InputTarget, Mode, STYLE_ROWS, StyleRow, WidthChoice};
+use crate::tui::app::{
+    App, DiffBase, Focus, HitTarget, InputTarget, Mode, STYLE_ROWS, StyleEditor, StyleRow,
+    WidthChoice,
+};
 use crate::tui::palette::{self, PaletteItem};
 
 /// プレビューの最大の表示行数。それ以上は、切り詰めて表示する
@@ -45,6 +48,7 @@ pub struct RawOverlay {
 /// 画面を描き、ratatui を介さず生の ANSI で出す領域（プレビューと部品の表示例）を返す。
 /// 生の ANSI は、ratatui の色の指定（256 色の指標）を通さないので、`render` の出力と同じ色になる
 pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
+    app.reset_hits();
     // 部品一覧にフォーカスがあるときは、選択中の項目を仮に入れた配置を見せる
     let tentative = app.tentative_editor();
     let editor = tentative.as_ref().unwrap_or(app.draft.layout());
@@ -104,6 +108,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     );
 
     let mut overlays = vec![draw_preview(frame, app, preview, &lines, columns, too_wide)];
+    app.add_hit(preview, HitTarget::Pane(Focus::Preview));
     if app.diff_view.is_some() {
         // 差分も、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
         draw_diff(frame, app, middle);
@@ -113,6 +118,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
         // 検証結果の一覧は、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
         draw_issues(frame, app, middle);
     } else {
+        app.add_hit(layout_area, HitTarget::Pane(Focus::Layout));
         draw_layout(frame, app, editor, config, layout_area, columns);
         if app.picker.is_some() {
             // 記号の候補を選んでいる間は、部品一覧の場所に候補を出す（部品の表示例の生 ANSI と重ならない）
@@ -124,6 +130,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
             overlays.extend(draw_parts(frame, app, config, parts, columns));
         }
     }
+    app.add_hit(props, HitTarget::Pane(Focus::Props));
     draw_props(frame, app, props);
     frame.render_widget(Paragraph::new(status_rows), status);
     frame.render_widget(
@@ -282,14 +289,116 @@ fn draw_layout(
     let block = focus_block(" 配置 ".to_string(), app.focus == Focus::Layout);
     let inner = block.inner(area);
 
+    let cursor = editor.cursor();
+    let LayoutRows {
+        rows,
+        token_boxes,
+        cursor_columns,
+    } = layout_rows(app, editor, config, columns);
+
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, area);
+        return;
+    }
+    let height = usize::from(inner.height);
+    // 行番号の桁数（2 桁を最小に、行数に合わせて増える）。横スクロールの幅の計算と、各行の描画で同じ値を使う
+    let number_width = rows.len().to_string().len().max(MIN_LINE_NUMBER_DIGITS);
+    let content_width =
+        usize::from(inner.width).saturating_sub(number_width + LINE_NUMBER_SEPARATOR_WIDTH);
+
+    // 行の幅。トークンの後ろの区切りの空白（行末の 1 つ）は、見せる内容ではないので含めない
+    let widest = rows
+        .iter()
+        .map(|spans| {
+            let width: usize = spans.iter().map(|s| display_width(&s.content)).sum();
+            let trailing = usize::from(spans.last().is_some_and(|s| s.content == " "));
+            width - trailing
+        })
+        .max()
+        .unwrap_or(0);
+
+    // 選択中のトークンが見えるようにスクロールする。縦は行、横は表示列（全行で共有）。
+    // 直前の位置を保ち、選択中のトークンが見えなくなったときだけ動かす（見えているトークンをクリックしても、画面は動かない）。
+    // トークンが領域より広いときは、トークンの先頭を優先する
+    let (previous_top, previous_left) = app.layout_scroll();
+    let top = follow_viewport(
+        previous_top.min(rows.len().saturating_sub(height)),
+        cursor.line,
+        cursor.line + 1,
+        height,
+    );
+    let left = follow_viewport(
+        previous_left.min(widest.saturating_sub(content_width)),
+        cursor_columns.0,
+        cursor_columns.1,
+        content_width,
+    );
+    app.set_layout_scroll(top, left);
+
+    let viewport = LayoutViewport {
+        top,
+        left,
+        height,
+        content_width,
+        gutter: number_width + LINE_NUMBER_SEPARATOR_WIDTH,
+    };
+    register_token_hits(app, inner, &token_boxes, &viewport);
+
+    // 続きがある方向を、枠の下に示す
+    let more = viewport.continuation(rows.len(), widest);
+    let block = if more.is_empty() {
+        block
+    } else {
+        block.title_bottom(format!(" 続き: {} ", more.join(" ")))
+    };
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .skip(top)
+        .take(height)
+        .map(|(line_index, spans)| {
+            let mut line = vec![Span::raw(format!("{:>number_width$}: ", line_index + 1))];
+            line.extend(clip_spans(spans, left, content_width));
+            Line::from(line)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 窓（`offset` から `size` 個）に、`start..end` の項目が収まるよう、窓の位置を求める。
+/// すでに収まっていれば動かさない。手前にはみ出すときは項目の先頭へ、後ろにはみ出すときは項目の末尾が窓の末尾に来る位置へ
+/// （項目が窓より大きいときは、項目の先頭を優先する）
+fn follow_viewport(offset: usize, start: usize, end: usize, size: usize) -> usize {
+    if start < offset {
+        start
+    } else if end > offset + size {
+        end.saturating_sub(size).min(start)
+    } else {
+        offset
+    }
+}
+
+/// 配置領域の行の内容（行番号の列を除く）と、各トークンの表示列の範囲
+struct LayoutRows {
+    rows: Vec<Vec<Span<'static>>>,
+    /// マウスの当たり判定用に、各トークンが占める表示列の範囲（行、行内の位置、開始列、終了列）
+    token_boxes: Vec<(usize, usize, usize, usize)>,
+    /// 選択中のトークンが占める表示列の範囲
+    cursor_columns: (usize, usize),
+}
+
+/// 配置の各行を、トークンのスパンに組み立てる。選択中のトークンは、フォーカスによって装飾を変える。
+/// 何も表示しないトークンは薄く、空の行と出力されない行には、その旨を添える
+fn layout_rows(app: &App, editor: &LayoutEditor, config: &Config, columns: usize) -> LayoutRows {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let layout = editor.layout();
     let cursor = editor.cursor();
     let visibility = layout_visibility(config, app.scenario(), layout, columns);
-
-    // 行ごとの内容（行番号の列を除く）と、選択中のトークンが占める表示列の範囲
     let mut cursor_columns = (0, 0);
-    let rows: Vec<Vec<Span<'static>>> = layout
+    let mut token_boxes = Vec::new();
+    let rows = layout
         .lines
         .iter()
         .zip(&visibility)
@@ -314,12 +423,14 @@ fn draw_layout(
                 if is_cursor {
                     cursor_columns = (x, x + width);
                 }
+                token_boxes.push((line_index, index, x, x + width));
                 spans.push(Span::styled(label, style));
                 spans.push(Span::raw(" "));
                 x += width + 1;
             }
             if tokens.is_empty() {
                 spans.push(Span::styled("（空の行）", dim));
+                token_boxes.push((line_index, 0, 0, display_width("（空の行）")));
             }
             if visibility.blank {
                 spans.push(Span::styled(" ← この行は出力されません", dim));
@@ -327,68 +438,79 @@ fn draw_layout(
             spans
         })
         .collect();
+    LayoutRows {
+        rows,
+        token_boxes,
+        cursor_columns,
+    }
+}
 
-    if inner.width == 0 || inner.height == 0 {
-        frame.render_widget(block, area);
+/// 配置領域の表示範囲（縦横のスクロール後）
+struct LayoutViewport {
+    /// 先頭に見える行
+    top: usize,
+    /// 左端に見える表示列（全行で共有）
+    left: usize,
+    height: usize,
+    /// 行番号の列を除いた、内容の幅
+    content_width: usize,
+    /// 行番号の列（番号と区切り）の幅
+    gutter: usize,
+}
+
+impl LayoutViewport {
+    /// 見えていない側の方向（`↑ ↓ ‹ ›`）。`rows` は全行数、`widest` は最も長い行の幅
+    fn continuation(&self, rows: usize, widest: usize) -> Vec<&'static str> {
+        let mut more = Vec::new();
+        if self.top > 0 {
+            more.push("↑");
+        }
+        if self.top + self.height < rows {
+            more.push("↓");
+        }
+        if self.left > 0 {
+            more.push("‹");
+        }
+        if self.left + self.content_width < widest {
+            more.push("›");
+        }
+        more
+    }
+}
+
+/// 配置のトークンを、マウスの当たり判定として登録する。`boxes` は、各トークンが占める表示列の範囲
+/// （行、行内の位置、開始列、終了列）。スクロールで見えている部分だけを登録する。
+/// 部品一覧にフォーカスがあるときは、仮に入れたトークンを含む配置を見せているので、実際の配置の位置とずれる。
+/// その間は登録しない（枠のクリックでフォーカスが移る）
+fn register_token_hits(
+    app: &App,
+    inner: Rect,
+    boxes: &[(usize, usize, usize, usize)],
+    view: &LayoutViewport,
+) {
+    if app.focus == Focus::Parts {
         return;
     }
-    let height = usize::from(inner.height);
-    // 行番号の桁数（2 桁を最小に、行数に合わせて増える）。横スクロールの幅の計算と、各行の描画で同じ値を使う
-    let number_width = rows.len().to_string().len().max(MIN_LINE_NUMBER_DIGITS);
-    let content_width =
-        usize::from(inner.width).saturating_sub(number_width + LINE_NUMBER_SEPARATOR_WIDTH);
-
-    // 選択中のトークンが見える位置までスクロールする。縦は行、横は表示列（全行で共有）。
-    // トークンが領域より広いときは、トークンの先頭を優先する
-    let top = (cursor.line + 1).saturating_sub(height);
-    let left = cursor_columns
-        .1
-        .saturating_sub(content_width)
-        .min(cursor_columns.0);
-    // 行の幅。トークンの後ろの区切りの空白（行末の 1 つ）は、見せる内容ではないので含めない
-    let widest = rows
-        .iter()
-        .map(|spans| {
-            let width: usize = spans.iter().map(|s| display_width(&s.content)).sum();
-            let trailing = usize::from(spans.last().is_some_and(|s| s.content == " "));
-            width - trailing
-        })
-        .max()
-        .unwrap_or(0);
-
-    // 続きがある方向を、枠の下に示す
-    let mut more = Vec::new();
-    if top > 0 {
-        more.push("↑");
+    let to_u16 = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+    for &(line, index, start, end) in boxes {
+        if line < view.top || line >= view.top + view.height {
+            continue;
+        }
+        let (from, to) = (
+            start.max(view.left),
+            end.min(view.left + view.content_width),
+        );
+        if from >= to {
+            continue;
+        }
+        let rect = Rect::new(
+            inner.x + to_u16(view.gutter + from - view.left),
+            inner.y + to_u16(line - view.top),
+            to_u16(to - from),
+            1,
+        );
+        app.add_hit(rect, HitTarget::LayoutToken { line, index });
     }
-    if top + height < rows.len() {
-        more.push("↓");
-    }
-    if left > 0 {
-        more.push("‹");
-    }
-    if left + content_width < widest {
-        more.push("›");
-    }
-    let block = if more.is_empty() {
-        block
-    } else {
-        block.title_bottom(format!(" 続き: {} ", more.join(" ")))
-    };
-    frame.render_widget(block, area);
-
-    let lines: Vec<Line> = rows
-        .into_iter()
-        .enumerate()
-        .skip(top)
-        .take(height)
-        .map(|(line_index, spans)| {
-            let mut line = vec![Span::raw(format!("{:>number_width$}: ", line_index + 1))];
-            line.extend(clip_spans(spans, left, content_width));
-            Line::from(line)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// 配置領域の行番号の最小の桁数（`" 1"`）。行数がこれを超えると、桁が増える
@@ -482,6 +604,15 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
         .take(height)
         .map(|(index, prop)| {
             let is_selected = index == selected;
+            app.add_hit(
+                Rect::new(
+                    inner.x,
+                    inner.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    inner.width,
+                    1,
+                ),
+                HitTarget::PropsRow(index),
+            );
             let key = format!("{:<width$}", prop.key, width = PROP_KEY_WIDTH);
             let key_style = if is_selected && focused {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -734,6 +865,55 @@ fn swatch_color(color: StyleColor) -> Color {
     }
 }
 
+/// スタイル編集画面の 1 行（選択中の行は太字）。色の行は現在の色と見本、装飾の行はオン・オフを示す
+fn style_row_line(editor: &StyleEditor, index: usize, row: StyleRow) -> Line<'static> {
+    let spec = editor.spec();
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let marker = if index == editor.row() { "> " } else { "  " };
+    let mut spans = vec![Span::raw(marker)];
+    match row {
+        StyleRow::Color(layer) => {
+            let (label, count) = match layer {
+                Layer::Foreground => ("前景", spec.color_count(Layer::Foreground)),
+                Layer::Background => ("背景", spec.color_count(Layer::Background)),
+            };
+            let current = spec.color(layer);
+            spans.push(Span::raw(format!("{label}  ‹ ")));
+            spans.push(Span::raw(current.map_or("なし", StyleColor::name)));
+            spans.push(Span::raw(" ›"));
+            if let Some(color) = current {
+                // 見本。前景は文字の色、背景は塗りで示す
+                let style = match layer {
+                    Layer::Foreground => Style::default().fg(swatch_color(color)),
+                    Layer::Background => Style::default().bg(swatch_color(color)),
+                };
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    if layer == Layer::Foreground {
+                        "Aa"
+                    } else {
+                        "  "
+                    },
+                    style,
+                ));
+            }
+            if count > 1 {
+                spans.push(Span::styled(format!("  （{count} 個指定）"), dim));
+            }
+        }
+        StyleRow::Decoration(decoration) => {
+            let mark = if spec.has(decoration) { "x" } else { " " };
+            spans.push(Span::raw(format!("[{mark}] {}", decoration.name())));
+        }
+    }
+    let line = Line::from(spans);
+    if index == editor.row() {
+        line.style(Style::default().add_modifier(Modifier::BOLD))
+    } else {
+        line
+    }
+}
+
 /// スタイル（色・装飾）のトグル選択（部品一覧の場所）。行ごとに現在の選択を示し、決まる仕様の文字列を併記する。
 /// 触らない既存のトークン（認識できないもの、複数の指定）は、その旨を添える
 fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
@@ -746,54 +926,12 @@ fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let lines: Vec<Line> = STYLE_ROWS
+        .iter()
+        .enumerate()
+        .map(|(index, row)| style_row_line(editor, index, *row))
+        .collect();
     let spec = editor.spec();
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let mut lines: Vec<Line> = Vec::new();
-    for (index, row) in STYLE_ROWS.iter().enumerate() {
-        let marker = if index == editor.row() { "> " } else { "  " };
-        let mut spans = vec![Span::raw(marker)];
-        match row {
-            StyleRow::Color(layer) => {
-                let (label, count) = match layer {
-                    Layer::Foreground => ("前景", spec.color_count(Layer::Foreground)),
-                    Layer::Background => ("背景", spec.color_count(Layer::Background)),
-                };
-                let current = spec.color(*layer);
-                spans.push(Span::raw(format!("{label}  ‹ ")));
-                spans.push(Span::raw(current.map_or("なし", StyleColor::name)));
-                spans.push(Span::raw(" ›"));
-                if let Some(color) = current {
-                    // 見本。前景は文字の色、背景は塗りで示す
-                    let style = match layer {
-                        Layer::Foreground => Style::default().fg(swatch_color(color)),
-                        Layer::Background => Style::default().bg(swatch_color(color)),
-                    };
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        if *layer == Layer::Foreground {
-                            "Aa"
-                        } else {
-                            "  "
-                        },
-                        style,
-                    ));
-                }
-                if count > 1 {
-                    spans.push(Span::styled(format!("  （{count} 個指定）"), dim));
-                }
-            }
-            StyleRow::Decoration(decoration) => {
-                let mark = if spec.has(*decoration) { "x" } else { " " };
-                spans.push(Span::raw(format!("[{mark}] {}", decoration.name())));
-            }
-        }
-        let line = Line::from(spans);
-        lines.push(if index == editor.row() {
-            line.style(Style::default().add_modifier(Modifier::BOLD))
-        } else {
-            line
-        });
-    }
 
     // 結果と案内は、枠の下端に固定する（行だけがスクロールする）。低い枠でも、結果は必ず見え、
     // 選んでいる行も隠れない（行の領域は 1 行以上を残す）。結果、案内の順に、収まる分だけ出す
@@ -821,6 +959,15 @@ fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
     let rows_height = height - notes.len();
 
     let offset = (editor.row() + 1).saturating_sub(rows_height);
+    // マウスの当たり判定: 領域全体と、見えている行
+    app.add_hit(area, HitTarget::Overlay);
+    for row in offset..STYLE_ROWS.len().min(offset + rows_height) {
+        let y = inner.y + u16::try_from(row - offset).unwrap_or(u16::MAX);
+        app.add_hit(
+            Rect::new(inner.x, y, inner.width, 1),
+            HitTarget::StyleRow(row),
+        );
+    }
     let visible: Vec<Line> = lines.into_iter().skip(offset).take(rows_height).collect();
     let rows_area = Rect::new(
         inner.x,
@@ -904,6 +1051,7 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     }
     let height = usize::from(inner.height);
     let selected = view.index().min(view.generations.len() - 1);
+    app.add_hit(area, HitTarget::Overlay);
     let offset = (selected + 1).saturating_sub(height);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let rows: Vec<Line> = view
@@ -914,6 +1062,15 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
         .skip(offset)
         .take(height)
         .map(|(index, (generation, (added, removed)))| {
+            app.add_hit(
+                Rect::new(
+                    inner.x,
+                    inner.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    inner.width,
+                    1,
+                ),
+                HitTarget::HistoryItem(index),
+            );
             let marker = if index == selected { "> " } else { "  " };
             let mut spans = vec![
                 Span::raw(marker),
@@ -950,6 +1107,7 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     let Some(view) = &app.diff_view else {
         return;
     };
+    app.add_hit(area, HitTarget::Overlay);
     let diff = view.diff();
     let mode = match view.mode {
         DiffMode::Changes => "変更箇所",
@@ -1056,6 +1214,7 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
 
     let text_width = usize::from(inner.width).saturating_sub(ISSUE_MARKER_WIDTH);
     let selected = view.index().min(issues.len() - 1);
+    let mut line_items: Vec<usize> = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
     let mut selected_rows = 0..0;
     for (index, issue) in issues.iter().enumerate() {
@@ -1083,6 +1242,7 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "  "
             };
+            line_items.push(index);
             lines.push(Line::from(vec![
                 Span::raw(marker),
                 Span::styled(part, style),
@@ -1114,6 +1274,15 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
         block
     };
     frame.render_widget(block, area);
+    // マウスの当たり判定: 領域全体と、見えている行（折り返した行は、同じ項目）
+    app.add_hit(area, HitTarget::Overlay);
+    for (row, item) in line_items.iter().skip(offset).take(height).enumerate() {
+        let y = inner.y + u16::try_from(row).unwrap_or(u16::MAX);
+        app.add_hit(
+            Rect::new(inner.x, y, inner.width, 1),
+            HitTarget::IssueItem(*item),
+        );
+    }
     let visible: Vec<Line> = lines.into_iter().skip(offset).take(height).collect();
     frame.render_widget(Paragraph::new(visible), inner);
 }
@@ -1151,6 +1320,7 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let height = usize::from(inner.height);
+    app.add_hit(area, HitTarget::Overlay);
     let offset = (picker.index() + 1).saturating_sub(height);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let rows: Vec<Line> = picker
@@ -1161,6 +1331,15 @@ fn draw_picker(frame: &mut Frame, app: &App, area: Rect) {
         .take(height)
         .map(|(index, candidate)| {
             let is_selected = index == picker.index();
+            app.add_hit(
+                Rect::new(
+                    inner.x,
+                    inner.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    inner.width,
+                    1,
+                ),
+                HitTarget::PickerItem(index),
+            );
             let label = if candidate.is_empty() {
                 "（記号なし）".to_string()
             } else {
@@ -1213,6 +1392,7 @@ fn draw_parts(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    app.add_hit(area, HitTarget::Pane(Focus::Parts));
     let items = app.visible_palette();
     if items.is_empty() {
         frame.render_widget(
@@ -1235,6 +1415,10 @@ fn draw_parts(
     let mut overlays = Vec::new();
     for (row, (index, item)) in (0..).zip(items.iter().enumerate().skip(offset).take(height)) {
         let is_selected = index == selected;
+        app.add_hit(
+            Rect::new(inner.x, inner.y + row, inner.width, 1),
+            HitTarget::PartsItem(index),
+        );
         let label = palette::label(*item);
         let padding = " ".repeat(usize::from(LABEL_WIDTH).saturating_sub(display_width(&label)));
         let label_style = if is_selected && app.focus == Focus::Parts {
@@ -1279,10 +1463,13 @@ fn draw_parts(
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
 
     use super::*;
     use crate::editor::draft::Draft;
+    use crate::editor::style_spec::Decoration;
     use crate::engine::config::DEFAULT_FORMAT;
 
     fn new_app() -> App {
@@ -1951,6 +2138,392 @@ mod tests {
         assert!(shown.contains("> [ ] inverted"), "{shown}");
     }
 
+    // ---- マウス操作（描画した画面の座標から、クリック・ホイールを送る） ----
+
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    fn click(app: &mut App, (column, row): (u16, u16)) {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), column, row);
+    }
+
+    fn wheel_at(app: &mut App, (column, row): (u16, u16), up: bool) {
+        let kind = if up {
+            MouseEventKind::ScrollUp
+        } else {
+            MouseEventKind::ScrollDown
+        };
+        mouse(app, kind, column, row);
+    }
+
+    /// 画面で `needle` が最初に現れる位置（列, 行）。全角文字は 2 列として数える。`row_contains` を含む行に限る
+    fn find_on_screen(screen: &[String], needle: &str, row_contains: &str) -> (u16, u16) {
+        for (row, line) in screen.iter().enumerate() {
+            if !line.contains(row_contains) {
+                continue;
+            }
+            if let Some(byte) = line.find(needle) {
+                let column = display_width(&line[..byte]);
+                return (u16::try_from(column).unwrap(), u16::try_from(row).unwrap());
+            }
+        }
+        panic!(
+            "{needle:?} が画面にない（{row_contains:?} を含む行）\n{}",
+            screen.join("\n")
+        );
+    }
+
+    fn find_text(screen: &[String], needle: &str) -> (u16, u16) {
+        find_on_screen(screen, needle, "")
+    }
+
+    /// 画面を描いて（当たり判定を登録して）、その画面を返す
+    fn draw_screen(app: &App, width: u16, height: u16) -> Vec<String> {
+        render(app, width, height).0
+    }
+
+    #[test]
+    fn test_click_on_a_pane_moves_the_focus() {
+        let mut app = app_with_focus(DEFAULT_FORMAT, Focus::Layout);
+        let screen = draw_screen(&app, 120, 40);
+        // プレビューの枠の内側（空白）、プロパティ欄の題の行
+        click(&mut app, find_text(&screen, "シナリオ"));
+        assert_eq!(app.focus, Focus::Preview);
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, "プロパティ:"));
+        assert_eq!(app.focus, Focus::Props);
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, "部品 ─"));
+        assert_eq!(app.focus, Focus::Parts);
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, "配置 ─"));
+        assert_eq!(app.focus, Focus::Layout);
+        // 画面の外・どの領域でもない場所は、何もしない
+        click(&mut app, (500, 500));
+        assert_eq!(app.focus, Focus::Layout);
+    }
+
+    #[test]
+    fn test_only_the_left_button_clicks_and_other_mouse_events_are_ignored() {
+        let mut app = app_with_focus(DEFAULT_FORMAT, Focus::Layout);
+        let screen = draw_screen(&app, 120, 40);
+        let at = find_text(&screen, "シナリオ");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            mouse(&mut app, kind, at.0, at.1);
+            assert_eq!(app.focus, Focus::Layout, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn test_click_selects_a_layout_token_and_a_parts_item_and_a_second_click_adds_it() {
+        let mut app = app_with_focus("$directory $model", Focus::Preview);
+        let screen = draw_screen(&app, 120, 40);
+        // 配置のトークンをクリック: フォーカスが配置に移り、そのトークンが選ばれる
+        click(&mut app, find_on_screen(&screen, "model", " 1: "));
+        assert_eq!(app.focus, Focus::Layout);
+        assert_eq!(
+            app.draft.layout().selected(),
+            Some(&Token::Part("model".to_string()))
+        );
+
+        // 部品一覧の項目をクリック: フォーカスが移って選ばれる（追加はしない）
+        let screen = draw_screen(&app, 120, 40);
+        let target = find_on_screen(&screen, "git_status", "git_status");
+        // 配置の行ではなく、部品一覧（右の枠）の行
+        let target = (target.0.max(60), target.1);
+        let _ = target;
+        let parts_right = screen
+            .iter()
+            .position(|line| {
+                line.split("││")
+                    .nth(1)
+                    .is_some_and(|r| r.contains("git_status"))
+            })
+            .unwrap();
+        let column = display_width(screen[parts_right].split("││").next().unwrap()) + 4;
+        let at = (
+            u16::try_from(column).unwrap(),
+            u16::try_from(parts_right).unwrap(),
+        );
+        click(&mut app, at);
+        assert_eq!(app.focus, Focus::Parts);
+        assert_eq!(app.selected_item(), Some(PaletteItem::Part("git_status")));
+        let before = app.draft.layout().layout().to_format();
+
+        // 選択済みの項目をもう一度クリック: Enter 相当（配置に追加される）
+        let _ = draw_screen(&app, 120, 40);
+        click(&mut app, at);
+        assert_ne!(app.draft.layout().layout().to_format(), before);
+        assert!(
+            app.draft
+                .layout()
+                .layout()
+                .to_format()
+                .contains("git_status")
+        );
+    }
+
+    #[test]
+    fn test_click_on_a_prop_row_selects_it_and_a_second_click_acts_like_enter() {
+        let mut app = props_app("$model");
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "disabled", "disabled"));
+        assert_eq!(app.focus, Focus::Props);
+        assert_eq!(
+            app.draft.prop_value("model", "disabled"),
+            Some(PropValue::Bool(false)),
+            "1 回目は選ぶだけ"
+        );
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "disabled", "disabled"));
+        assert_eq!(
+            app.draft.prop_value("model", "disabled"),
+            Some(PropValue::Bool(true)),
+            "選択済みをもう一度クリックすると、Enter 相当（真偽値の反転）"
+        );
+    }
+
+    #[test]
+    fn test_clicking_a_scrolled_layout_selects_the_token_under_the_pointer() {
+        // 横にスクロールするほど長い 1 行（トークンは directory, " ", model, " ", ..., " ", quota の 63 個）。
+        // 末尾のトークンを選ぶと、先頭は見えなくなる
+        let format = format!("$directory{} $quota", " $model".repeat(30));
+        let mut app = app_with_focus(&format, Focus::Layout);
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Right);
+        }
+        let last = app.draft.layout().cursor().index;
+        assert_eq!(last, 62);
+        let screen = draw_screen(&app, 100, 20);
+        let pane = layout_pane(&screen);
+        assert!(pane.contains('‹'), "横にスクロールしている\n{pane}");
+        assert!(!pane.contains("directory"), "先頭は見えない\n{pane}");
+
+        // 見えている model をクリック: 末尾ではなく、その model が選ばれる（スクロール前の座標ではなく、見えている位置で当たる）
+        let pane_lines: Vec<String> = pane.lines().map(str::to_string).collect();
+        click(&mut app, find_on_screen(&pane_lines, "model", " 1: "));
+        assert_eq!(app.focus, Focus::Layout);
+        let cursor = app.draft.layout().cursor();
+        assert_eq!(
+            app.draft.layout().selected(),
+            Some(&Token::Part("model".to_string()))
+        );
+        assert!(
+            cursor.index < last && cursor.index.is_multiple_of(2),
+            "{cursor:?}"
+        );
+
+        // クリックした model が、そのまま見えている（画面が飛ばない）。末尾の quota をクリックして戻れる
+        let screen = draw_screen(&app, 100, 20);
+        let pane_lines: Vec<String> = layout_pane(&screen).lines().map(str::to_string).collect();
+        click(&mut app, find_on_screen(&pane_lines, "quota", " 1: "));
+        assert_eq!(app.draft.layout().cursor().index, last);
+    }
+
+    #[test]
+    fn test_clicking_a_layout_with_three_digit_line_numbers_selects_the_right_line() {
+        let mut lines = vec!["$model".to_string(); 99];
+        lines.push("$quota".to_string());
+        let mut app = app_with_focus(&lines.join("\n"), Focus::Layout);
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Down);
+        }
+        // 100 行目（quota）と 99 行目（model）が見えている。行番号の列は 3 桁分の幅で、その分だけ右にずれる
+        let screen = draw_screen(&app, 100, 40);
+        click(&mut app, find_on_screen(&screen, "model", " 99: "));
+        assert_eq!(app.draft.layout().cursor().line, 98);
+        assert_eq!(
+            app.draft.layout().selected(),
+            Some(&Token::Part("model".to_string()))
+        );
+        // 選択が動いても画面がずれない範囲（98 行目の選択でも 100 行目は見える）で、100 行目をクリックして戻る
+        let screen = draw_screen(&app, 100, 40);
+        if let Some(row) = screen.iter().find(|line| line.contains("100: ")) {
+            assert!(row.contains("quota"));
+            click(&mut app, find_on_screen(&screen, "quota", "100: "));
+            assert_eq!(app.draft.layout().cursor().line, 99);
+        } else {
+            // 100 行目が画面の外に出たときは、ホイールで下へ戻れる
+            wheel_at(&mut app, find_on_screen(&screen, "model", " 99: "), false);
+            assert_eq!(app.draft.layout().cursor().line, 99);
+        }
+    }
+
+    #[test]
+    fn test_clicking_the_layout_while_a_part_is_being_tried_only_moves_the_focus() {
+        // 部品一覧にフォーカスがあるときの配置は、仮に入れたトークンを含む。位置がずれるので、トークンは選ばない
+        let mut app = app_with_focus("$directory $model", Focus::Parts);
+        let before = app.draft.layout().cursor();
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "model", " 1: "));
+        assert_eq!(app.focus, Focus::Layout);
+        assert_eq!(app.draft.layout().cursor(), before);
+    }
+
+    #[test]
+    fn test_wheel_moves_the_selection_of_the_pane_under_the_pointer() {
+        let mut app = app_with_focus(DEFAULT_FORMAT, Focus::Layout);
+        let screen = draw_screen(&app, 120, 40);
+        // 部品一覧の上でホイール: フォーカスが移り、選択が動く
+        let parts = screen
+            .iter()
+            .position(|line| {
+                line.split("││")
+                    .nth(1)
+                    .is_some_and(|r| r.contains("git_branch"))
+            })
+            .unwrap();
+        let column = display_width(screen[parts].split("││").next().unwrap()) + 4;
+        let at = (
+            u16::try_from(column).unwrap(),
+            u16::try_from(parts).unwrap(),
+        );
+        wheel_at(&mut app, at, false);
+        assert_eq!(app.focus, Focus::Parts);
+        assert_eq!(app.palette_index(), 1);
+        wheel_at(&mut app, at, false);
+        assert_eq!(app.palette_index(), 2);
+        wheel_at(&mut app, at, true);
+        assert_eq!(app.palette_index(), 1);
+        // プレビューの上は、何も起きない
+        let preview = find_text(&screen, "シナリオ");
+        wheel_at(&mut app, preview, false);
+        assert_eq!(app.focus, Focus::Parts);
+        assert_eq!(app.palette_index(), 1);
+    }
+
+    #[test]
+    fn test_overlays_take_the_mouse_and_block_the_main_screen() {
+        let toml = "[nothing]\nx = 1\n\n[other]\nx = 1\n\n[third]\nx = 1\n";
+        let mut app = app_from_toml(toml);
+        press(&mut app, KeyCode::Char('v'));
+        let screen = draw_screen(&app, 120, 40);
+
+        // メイン画面（プレビューやプロパティ欄）のクリックは、受けない
+        click(&mut app, find_text(&screen, "シナリオ"));
+        click(&mut app, find_text(&screen, "プロパティ:"));
+        assert_eq!(app.focus, Focus::Layout);
+        assert!(app.issues_view.is_some());
+
+        // 一覧の行をクリックして選ぶ。ホイールで動く
+        click(&mut app, find_on_screen(&screen, "other", "other"));
+        assert_eq!(app.issues_view.as_ref().unwrap().index(), 1);
+        click(&mut app, find_on_screen(&screen, "third", "third"));
+        assert_eq!(app.issues_view.as_ref().unwrap().index(), 2);
+        let at = find_on_screen(&screen, "nothing", "nothing");
+        wheel_at(&mut app, at, true);
+        assert_eq!(app.issues_view.as_ref().unwrap().index(), 1);
+        wheel_at(&mut app, at, true);
+        wheel_at(&mut app, at, true);
+        assert_eq!(app.issues_view.as_ref().unwrap().index(), 0, "先頭で止まる");
+    }
+
+    #[test]
+    fn test_history_picker_and_style_rows_select_on_click_and_act_on_a_second_click() {
+        // 記号の候補: 1 回目で選び、2 回目で決定する
+        let mut app = props_app("$git_branch");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_some());
+        let screen = draw_screen(&app, 120, 40);
+        let candidate = find_on_screen(&screen, "\"🌱␣\"", "🌱");
+        click(&mut app, candidate);
+        assert!(app.picker.is_some(), "1 回目は選ぶだけ");
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "\"🌱␣\"", "🌱"));
+        assert!(
+            app.picker.is_none(),
+            "選択済みをもう一度クリックすると、決定"
+        );
+        assert_eq!(
+            app.draft.prop_value("git_branch", "symbol"),
+            Some(PropValue::Str("🌱 ".to_string()))
+        );
+
+        // スタイル編集: 行を選び、もう一度クリックでオン・オフ（Space 相当）
+        let mut app = props_app("$directory");
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.style_editor.is_some());
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "[x] bold", "bold"));
+        assert!(
+            app.style_editor
+                .as_ref()
+                .unwrap()
+                .spec()
+                .has(Decoration::Bold)
+        );
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_on_screen(&screen, "[x] bold", "bold"));
+        assert!(
+            !app.style_editor
+                .as_ref()
+                .unwrap()
+                .spec()
+                .has(Decoration::Bold),
+            "選択済みをもう一度クリックすると、オフ"
+        );
+        assert_eq!(app.style_editor.as_ref().unwrap().spec().text(), "cyan");
+    }
+
+    #[test]
+    fn test_history_rows_select_on_click_and_open_the_diff_on_a_second_click() {
+        let storage = crate::tui::storage::fake::FakeStorage::default();
+        let mut app =
+            App::with_storage_for_test(Draft::with_format("$model"), Box::new(storage.clone()));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('s'));
+        storage.0.borrow_mut().generations = vec![
+            generation_at(20, "format = \"$plan\"\n"),
+            generation_at(10, "format = \"$quota\"\n"),
+        ];
+        press(&mut app, KeyCode::Char('H'));
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, &shown_time(10)));
+        assert_eq!(app.history_view.as_ref().unwrap().index(), 1);
+        assert!(app.diff_view.is_none(), "1 回目は選ぶだけ");
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, &shown_time(10)));
+        assert!(app.diff_view.as_ref().unwrap().is_restore_preview());
+        // 差分の上でのホイールは、スクロール（上限がなければ動かない）で、他へ漏れない
+        let screen = draw_screen(&app, 120, 40);
+        wheel_at(&mut app, find_text(&screen, "差分"), false);
+        assert!(app.diff_view.is_some());
+        assert_eq!(app.history_view.as_ref().unwrap().index(), 1);
+    }
+
+    #[test]
+    fn test_mouse_is_ignored_while_typing() {
+        let mut app = props_app("$model");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // style → 編集画面
+        press(&mut app, KeyCode::Char('e')); // 自由入力
+        assert!(app.input.is_some());
+        let screen = draw_screen(&app, 120, 40);
+        click(&mut app, find_text(&screen, "シナリオ"));
+        wheel_at(&mut app, find_text(&screen, "シナリオ"), false);
+        assert_eq!(app.focus, Focus::Props);
+        assert!(app.input.is_some());
+    }
+
     #[test]
     fn test_clip_spans() {
         let plain = Style::default();
@@ -2102,6 +2675,55 @@ mod tests {
         assert!(!end.contains('›'), "{end}");
         // 行番号の列は固定
         assert!(end.contains("│ 1: "), "{end}");
+    }
+
+    #[test]
+    fn test_follow_viewport() {
+        // (名前, 窓の位置, 項目の範囲, 窓の大きさ, 期待する窓の位置)
+        let cases = [
+            ("already-visible", 5, (6, 7), 10, 5),
+            ("visible-at-the-start", 5, (5, 6), 10, 5),
+            ("visible-at-the-end", 5, (14, 15), 10, 5),
+            ("before-the-window", 5, (2, 3), 10, 2),
+            ("after-the-window", 5, (15, 16), 10, 6),
+            ("wide-item-fits-after-moving", 0, (8, 14), 10, 4),
+            (
+                "item-wider-than-the-window-prefers-its-start",
+                0,
+                (20, 50),
+                10,
+                20,
+            ),
+            ("zero-size-window", 3, (7, 8), 0, 7),
+        ];
+        for (name, offset, (start, end), size, expected) in cases {
+            assert_eq!(
+                follow_viewport(offset, start, end, size),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_does_not_scroll_while_the_cursor_stays_visible() {
+        let lines: Vec<&str> = vec!["$model"; 30];
+        let mut app = app_with_focus(&lines.join("\n"), Focus::Layout);
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Down);
+        }
+        let bottom = layout_pane(&draw_screen(&app, 100, 24));
+        assert!(bottom.contains("30: "), "{bottom}");
+        // 1 行戻っても、見えている範囲は動かない（30 行目も見えたまま）
+        press(&mut app, KeyCode::Up);
+        let after = layout_pane(&draw_screen(&app, 100, 24));
+        assert!(after.contains("30: ") && after.contains("29: "), "{after}");
+        // 窓の先頭より上へ出ると、そこまでスクロールする
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Up);
+        }
+        let top = layout_pane(&draw_screen(&app, 100, 24));
+        assert!(top.contains("│ 1: ") && !top.contains("30: "), "{top}");
     }
 
     #[test]
