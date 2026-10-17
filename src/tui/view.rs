@@ -274,23 +274,26 @@ fn draw_layout(
 ) {
     let block = focus_block(" 配置 ".to_string(), app.focus == Focus::Layout);
     let inner = block.inner(area);
-    frame.render_widget(block, area);
 
     let dim = Style::default().add_modifier(Modifier::DIM);
     let layout = editor.layout();
     let cursor = editor.cursor();
     let visibility = layout_visibility(config, app.scenario(), layout, columns);
 
-    let rows: Vec<Line> = layout
+    // 行ごとの内容（行番号の列を除く）と、選択中のトークンが占める表示列の範囲
+    let mut cursor_columns = (0, 0);
+    let rows: Vec<Vec<Span<'static>>> = layout
         .lines
         .iter()
         .zip(&visibility)
         .enumerate()
         .map(|(line_index, (tokens, visibility))| {
-            let mut spans = vec![Span::raw(format!("{:>2}: ", line_index + 1))];
+            let mut spans = Vec::new();
+            let mut x = 0;
             for (index, (token, hidden)) in tokens.iter().zip(&visibility.hidden).enumerate() {
                 let mut style = if *hidden { dim } else { Style::default() };
-                if (cursor.line, cursor.index) == (line_index, index) {
+                let is_cursor = (cursor.line, cursor.index) == (line_index, index);
+                if is_cursor {
                     style = match app.focus {
                         Focus::Layout => style.add_modifier(Modifier::REVERSED),
                         Focus::Parts => Style::default()
@@ -299,8 +302,14 @@ fn draw_layout(
                         Focus::Props | Focus::Preview => style.add_modifier(Modifier::UNDERLINED),
                     };
                 }
-                spans.push(Span::styled(token_label(token), style));
+                let label = neutralize(&token_label(token));
+                let width = display_width(&label);
+                if is_cursor {
+                    cursor_columns = (x, x + width);
+                }
+                spans.push(Span::styled(label, style));
                 spans.push(Span::raw(" "));
+                x += width + 1;
             }
             if tokens.is_empty() {
                 spans.push(Span::styled("（空の行）", dim));
@@ -308,10 +317,114 @@ fn draw_layout(
             if visibility.blank {
                 spans.push(Span::styled(" ← この行は出力されません", dim));
             }
-            Line::from(spans)
+            spans
         })
         .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
+
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, area);
+        return;
+    }
+    let height = usize::from(inner.height);
+    // 行番号の桁数（2 桁を最小に、行数に合わせて増える）。横スクロールの幅の計算と、各行の描画で同じ値を使う
+    let number_width = rows.len().to_string().len().max(MIN_LINE_NUMBER_DIGITS);
+    let content_width =
+        usize::from(inner.width).saturating_sub(number_width + LINE_NUMBER_SEPARATOR_WIDTH);
+
+    // 選択中のトークンが見える位置までスクロールする。縦は行、横は表示列（全行で共有）。
+    // トークンが領域より広いときは、トークンの先頭を優先する
+    let top = (cursor.line + 1).saturating_sub(height);
+    let left = cursor_columns
+        .1
+        .saturating_sub(content_width)
+        .min(cursor_columns.0);
+    // 行の幅。トークンの後ろの区切りの空白（行末の 1 つ）は、見せる内容ではないので含めない
+    let widest = rows
+        .iter()
+        .map(|spans| {
+            let width: usize = spans.iter().map(|s| display_width(&s.content)).sum();
+            let trailing = usize::from(spans.last().is_some_and(|s| s.content == " "));
+            width - trailing
+        })
+        .max()
+        .unwrap_or(0);
+
+    // 続きがある方向を、枠の下に示す
+    let mut more = Vec::new();
+    if top > 0 {
+        more.push("↑");
+    }
+    if top + height < rows.len() {
+        more.push("↓");
+    }
+    if left > 0 {
+        more.push("‹");
+    }
+    if left + content_width < widest {
+        more.push("›");
+    }
+    let block = if more.is_empty() {
+        block
+    } else {
+        block.title_bottom(format!(" 続き: {} ", more.join(" ")))
+    };
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .skip(top)
+        .take(height)
+        .map(|(line_index, spans)| {
+            let mut line = vec![Span::raw(format!("{:>number_width$}: ", line_index + 1))];
+            line.extend(clip_spans(spans, left, content_width));
+            Line::from(line)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 配置領域の行番号の最小の桁数（`" 1"`）。行数がこれを超えると、桁が増える
+const MIN_LINE_NUMBER_DIGITS: usize = 2;
+
+/// 行番号の後ろの区切り（`": "`）の表示幅
+const LINE_NUMBER_SEPARATOR_WIDTH: usize = 2;
+
+/// 行の表示列 `skip..skip + width` だけを残す。全角文字が境界をまたぐときは、見える分の空白に置き換える。
+/// 幅 0 の文字（結合文字など）は、直前の文字をそのまま残したときだけ残す（基底文字が欠ければ、一緒に落とす）
+fn clip_spans(spans: Vec<Span<'static>>, skip: usize, width: usize) -> Vec<Span<'static>> {
+    let end = skip + width;
+    let mut clipped = Vec::new();
+    let mut x = 0;
+    let mut base_kept = false;
+    for span in spans {
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let char_width = display_width(c.encode_utf8(&mut [0; 4]));
+            if char_width == 0 {
+                if base_kept {
+                    text.push(c);
+                }
+                continue;
+            }
+            let (start, stop) = (x, x + char_width);
+            x = stop;
+            base_kept = false;
+            if stop <= skip || start >= end {
+                continue;
+            }
+            if start < skip || stop > end {
+                text.push_str(&" ".repeat(stop.min(end) - start.max(skip)));
+            } else {
+                text.push(c);
+                base_kept = true;
+            }
+        }
+        if !text.is_empty() {
+            clipped.push(Span::styled(text, span.style));
+        }
+    }
+    clipped
 }
 
 /// 部品は ID、固定テキストは引用符で囲み、空白は `␣` にして、見分けられるようにする
@@ -1566,6 +1679,180 @@ mod tests {
         let (screen, overlays) = render(&app, 100, 30);
         assert!(screen.join("\n").contains("directory quota"));
         assert!(overlay_text(&overlays[..1]).contains("5h:"));
+    }
+
+    #[test]
+    fn test_clip_spans() {
+        let plain = Style::default();
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let text = |spans: &[Span]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let make = || {
+            vec![
+                Span::styled("abc", plain),
+                Span::styled("日本語", bold),
+                Span::styled("def", plain),
+            ]
+        };
+        // (名前, 開始列, 幅, 期待する文字列)。全体は `abc日本語def`（abc=0〜2、日=3〜4、本=5〜6、語=7〜8、def=9〜11）
+        let cases = [
+            ("all", 0, 100, "abc日本語def"),
+            ("prefix", 0, 5, "abc日"),
+            ("middle", 2, 3, "c日"),
+            ("tail", 9, 10, "def"),
+            ("wide-cut-on-the-left", 4, 5, " 本語"),
+            ("wide-cut-on-the-right", 3, 3, "日 "),
+            ("wide-cut-on-both-sides", 4, 3, " 本"),
+            ("zero-width", 2, 0, ""),
+            ("beyond-the-end", 50, 10, ""),
+        ];
+        for (name, skip, width, expected) in cases {
+            let clipped = clip_spans(make(), skip, width);
+            assert_eq!(text(&clipped), expected, "{name}");
+            assert!(
+                display_width(&text(&clipped)) <= width,
+                "{name}: 幅を超えない"
+            );
+        }
+        // 装飾は、残った部分に引き継がれる
+        let clipped = clip_spans(make(), 3, 6);
+        assert_eq!(text(&clipped), "日本語");
+        assert_eq!(clipped[0].style, bold);
+    }
+
+    #[test]
+    fn test_clip_spans_keeps_combining_marks_with_their_visible_base() {
+        // e + 結合アキュート（幅 1 + 0）、x、全角の日 + 結合アキュート（幅 2 + 0）
+        let make = || vec![Span::raw("e\u{301}x"), Span::raw("日\u{301}")];
+        let text = |spans: &[Span]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        // (名前, 開始列, 幅, 期待する文字列)。列は e=0、x=1、日=2〜3
+        let cases = [
+            ("combining-at-the-right-edge", 0, 1, "e\u{301}"),
+            ("combining-inside", 0, 2, "e\u{301}x"),
+            ("combining-dropped-with-its-skipped-base", 1, 1, "x"),
+            ("wide-base-with-combining-fully-inside", 2, 2, "日\u{301}"),
+            ("wide-base-cut-drops-its-combining", 2, 1, " "),
+            ("wide-base-cut-on-the-left-drops-its-combining", 3, 1, " "),
+            ("everything", 0, 10, "e\u{301}x日\u{301}"),
+        ];
+        for (name, skip, width, expected) in cases {
+            assert_eq!(text(&clip_spans(make(), skip, width)), expected, "{name}");
+        }
+        // 幅 0 の文字が span の先頭にあっても、直前の span の基底文字が残っていれば残す
+        let split = vec![Span::raw("e"), Span::raw("\u{301}")];
+        assert_eq!(text(&clip_spans(split, 0, 1)), "e\u{301}");
+    }
+
+    #[test]
+    fn test_layout_scroll_accounts_for_a_wider_line_number_column() {
+        // 100 行目は行番号が 3 桁（`100: `）になる。右端のトークンの末尾まで見えること
+        let last = format!("$directory{} $quota", " $model".repeat(30));
+        let mut lines = vec!["$model".to_string(); 99];
+        lines.push(last);
+        let mut app = app_with_focus(&lines.join("\n"), Focus::Layout);
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Down);
+        }
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Right);
+        }
+        for (width, height) in [(100, 20), (60, 14), (40, 12)] {
+            let (screen, _) = render(&app, width, height);
+            let pane = layout_pane(&screen);
+            let row = pane
+                .lines()
+                .find(|line| line.contains("100: "))
+                .unwrap_or_else(|| panic!("{width}x{height}: 100 行目が見える\n{pane}"));
+            assert!(
+                row.trim_end().ends_with("quota"),
+                "{width}x{height}: 末尾のトークンが欠けない: {row:?}"
+            );
+        }
+        // 3 桁の行番号の列は、全行で同じ幅（右揃え）
+        let (screen, _) = render(&app, 100, 40);
+        let pane = layout_pane(&screen);
+        assert!(pane.contains("│ 99: "), "{pane}");
+        assert!(pane.contains("│100: "), "{pane}");
+    }
+
+    /// 配置領域（左の枠）の各行。部品一覧（右の枠）との間の `││` で切る
+    fn layout_pane(screen: &[String]) -> String {
+        screen
+            .iter()
+            .map(|line| line.split("││").next().unwrap_or(line).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_layout_scrolls_vertically_to_keep_the_cursor_visible() {
+        let lines: Vec<&str> = vec!["$model"; 30];
+        let mut app = app_with_focus(&lines.join("\n"), Focus::Layout);
+        let (screen, _) = render(&app, 100, 14);
+        let top = layout_pane(&screen);
+        assert!(top.contains("│ 1: "), "{top}");
+        assert!(!top.contains("30: "), "{top}");
+        // 下に続きがある（上にはない）
+        assert!(top.contains("続き: ↓"), "{top}");
+        assert!(!top.contains("続き: ↑"), "{top}");
+
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Down);
+        }
+        let (screen, _) = render(&app, 100, 14);
+        let bottom = layout_pane(&screen);
+        assert!(bottom.contains("30: "), "選択中の最終行が見える\n{bottom}");
+        assert!(!bottom.contains("│ 1: "), "{bottom}");
+        assert!(bottom.contains("続き: ↑"), "{bottom}");
+        assert!(
+            !bottom.contains("続き: ↓") && !bottom.contains("↑ ↓"),
+            "{bottom}"
+        );
+    }
+
+    #[test]
+    fn test_layout_scrolls_horizontally_to_keep_the_cursor_visible() {
+        // 1 行が配置領域の幅を大きく超える（先頭が `$directory`、末尾が `$quota`）
+        let format = format!("$directory{} $quota", " $model".repeat(30));
+        let mut app = app_with_focus(&format, Focus::Layout);
+        let (screen, _) = render(&app, 100, 20);
+        let start = layout_pane(&screen);
+        assert!(start.contains("directory"), "{start}");
+        assert!(start.contains("続き: ›"), "{start}");
+        assert!(!start.contains('‹'), "{start}");
+
+        // 末尾のトークンまで進むと、横にスクロールして、そのトークンが見える（先頭は見えなくなる）
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Right);
+        }
+        let (screen, _) = render(&app, 100, 20);
+        let end = layout_pane(&screen);
+        assert!(end.contains("quota"), "{end}");
+        assert!(!end.contains("directory"), "{end}");
+        assert!(end.contains("続き: ‹"), "{end}");
+        assert!(!end.contains('›'), "{end}");
+        // 行番号の列は固定
+        assert!(end.contains("│ 1: "), "{end}");
+    }
+
+    #[test]
+    fn test_layout_without_overflow_shows_no_scroll_hint() {
+        let app = app_with_focus("$directory $model\n$plan", Focus::Layout);
+        let (screen, _) = render(&app, 100, 24);
+        assert!(!layout_pane(&screen).contains("続き:"));
+    }
+
+    #[test]
+    fn test_layout_scroll_survives_tiny_terminals() {
+        let format = format!("$directory{} $quota", " $model".repeat(30));
+        let lines = [format.as_str(); 12];
+        let mut app = app_with_focus(&lines.join("\n"), Focus::Layout);
+        for _ in 0..30 {
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Right);
+        }
+        for (width, height) in [(1, 1), (3, 3), (5, 4), (10, 5), (20, 8), (40, 12)] {
+            let _ = render(&app, width, height);
+        }
     }
 
     #[test]
