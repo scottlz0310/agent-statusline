@@ -794,19 +794,21 @@ fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
             line
         });
     }
-    lines.push(Line::raw(""));
+
+    // 結果と案内は、枠の下端に固定する（行だけがスクロールする）。低い枠でも、結果は必ず見え、
+    // 選んでいる行も隠れない（行の領域は 1 行以上を残す）。結果、案内の順に、収まる分だけ出す
     let text = spec.text();
-    lines.push(Line::from(format!(
+    let mut notes = vec![Line::from(format!(
         "結果: {}",
         if text.is_empty() {
             "（なし）".to_string()
         } else {
             neutralize(&text)
         }
-    )));
+    ))];
     let unknown = spec.unknown_tokens();
     if !unknown.is_empty() {
-        lines.push(Line::from(Span::styled(
+        notes.push(Line::from(Span::styled(
             format!(
                 "認識できないトークン（そのまま残ります）: {}",
                 neutralize(&unknown.join(" "))
@@ -814,11 +816,28 @@ fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         )));
     }
-
     let height = usize::from(inner.height);
-    let offset = (editor.row() + 1).saturating_sub(height);
-    let visible: Vec<Line> = lines.into_iter().skip(offset).take(height).collect();
-    frame.render_widget(Paragraph::new(visible), inner);
+    notes.truncate(height.saturating_sub(1));
+    let rows_height = height - notes.len();
+
+    let offset = (editor.row() + 1).saturating_sub(rows_height);
+    let visible: Vec<Line> = lines.into_iter().skip(offset).take(rows_height).collect();
+    let rows_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        u16::try_from(rows_height).unwrap_or(0),
+    );
+    frame.render_widget(Paragraph::new(visible), rows_area);
+    if !notes.is_empty() {
+        let notes_area = Rect::new(
+            inner.x,
+            inner.y + rows_area.height,
+            inner.width,
+            inner.height - rows_area.height,
+        );
+        frame.render_widget(Paragraph::new(notes), notes_area);
+    }
 }
 
 /// 設定ファイル由来の文字列を画面に出すための無害化。タブは空白に、そのほかの制御文字は `U+FFFD` にする
@@ -1854,6 +1873,64 @@ mod tests {
         );
         assert!(shown.contains("（2 個指定）"), "{shown}");
         assert!(shown.contains("結果: cyna bold red green"), "{shown}");
+    }
+
+    #[test]
+    fn test_style_editor_keeps_the_result_visible_even_in_a_short_pane() {
+        let toml = "[directory]\nfolder_style = \"cyna bold red\"\n";
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let mut app = App::for_test(Draft::new(config, toml.parse().unwrap()));
+        press(&mut app, KeyCode::Tab);
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        // 最後の行（inverted）を選ぶ。行は 7 つあるので、低い枠では、行がスクロールする
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Down);
+        }
+        // 端末の高さを変えながら、スタイル編集の枠の内側の行数（題の行から下の枠線の行までの間）を数える
+        let (mut short, mut roomy) = (0, 0);
+        for height in 14..=40 {
+            let (screen, _) = render(&app, 100, height);
+            let title = screen
+                .iter()
+                .position(|l| l.contains("スタイル: directory"))
+                .unwrap();
+            let bottom = screen[title..]
+                .iter()
+                .position(|l| l.contains("┘└"))
+                .unwrap();
+            let right_pane = |line: &String| line.split("││").nth(1).unwrap_or("").to_string();
+            let inner: Vec<String> = screen[title + 1..title + bottom]
+                .iter()
+                .map(right_pane)
+                .collect();
+            let inner_text = inner.join("\n");
+            let ctx = format!(
+                "高さ {height}、枠の内側 {} 行\n{}",
+                inner.len(),
+                screen.join("\n")
+            );
+            // どの高さでも、選んでいる行は見える。内側が 2 行以上あれば、結果も同時に見える（下端に固定される）
+            assert!(inner_text.contains("> [ ] inverted"), "{ctx}");
+            if inner.len() >= 2 {
+                assert!(inner_text.contains("結果: cyna bold red"), "{ctx}");
+                short += 1;
+            }
+            // 3 行以上あれば、未知のトークンの案内も出る（結果を優先し、収まる分だけ）
+            if inner.len() >= 3 {
+                assert!(
+                    inner_text.contains("認識できないトークン（そのまま残ります）: cyna"),
+                    "{ctx}"
+                );
+                roomy += 1;
+            }
+        }
+        assert!(
+            short >= 3 && roomy >= 3,
+            "短い枠・余裕のある枠の両方を確認した: {short}, {roomy}"
+        );
     }
 
     #[test]
