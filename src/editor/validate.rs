@@ -11,6 +11,7 @@ use crate::engine::config::Config;
 use crate::engine::parts::{PARTS, PropKind, PropSpec};
 use crate::engine::style::unknown_style_tokens;
 use crate::engine::template::unknown_variables;
+use crate::modules::directory::{MAX_PATH_LEN, MIN_PATH_LEN, is_valid_max_length};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -59,6 +60,7 @@ pub fn validate(text: &str) -> Report {
     let config = match toml_edit::de::from_str::<Config>(text) {
         Ok(config) => {
             check_thresholds(&config, &mut issues);
+            check_max_length(&config, &mut issues);
             Some(config)
         }
         Err(err) => {
@@ -123,6 +125,18 @@ fn check_thresholds(config: &Config, issues: &mut Vec<Issue>) {
             );
             issues.push(error(&path, message));
         }
+    }
+}
+
+fn check_max_length(config: &Config, issues: &mut Vec<Issue>) {
+    let value = config.directory.max_length;
+    if !i64::try_from(value).is_ok_and(is_valid_max_length) {
+        issues.push(error(
+            "directory.max_length",
+            format!(
+                "0（自動）または {MIN_PATH_LEN}〜{MAX_PATH_LEN} の整数を指定してください: {value}"
+            ),
+        ));
     }
 }
 
@@ -331,6 +345,18 @@ mod tests {
                 "[directory]\ntruncation_mode = \"right\"\n",
                 "directory.truncation_mode",
                 "left / middle",
+            ),
+            (
+                "max-length-too-short",
+                "[directory]\nmax_length = 9\n",
+                "directory.max_length",
+                "10〜1000",
+            ),
+            (
+                "max-length-too-long",
+                "[directory]\nmax_length = 1001\n",
+                "directory.max_length",
+                "10〜1000",
             ),
             (
                 "unknown-style-in-set",

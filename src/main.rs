@@ -101,7 +101,7 @@ fn cmd_render(
         }
     }
 
-    let term_width = terminal_size::terminal_size().map_or(80, |(w, _)| w.0 as usize);
+    let term_width = modules::terminal::width();
 
     let output = engine::formatter::render_template(&config, &state, term_width);
     println!("{output}");

@@ -4,3 +4,4 @@ pub mod git;
 mod git_system_config;
 pub mod quota;
 pub mod review;
+pub mod terminal;

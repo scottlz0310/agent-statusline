@@ -63,7 +63,7 @@ src/
   │      ├─ gix による Git ブランチ・変更状態・リモート (`owner/repo`) の取得
   │      ├─ Squirrel Notifier のレビュー・キュー状態サマリの読み込み (`$review` 使用時)
   │      ├─ chrono / 内部算術によるクォータ reset_time 差分計算
-  │      └─ terminal_size によるターミナル幅取得
+  │      └─ terminal_size によるターミナル幅取得（取れないとき〔パイプ実行〕は環境変数 `COLUMNS`、それも無ければ 80）
   ├─ 5. Sink 処理 (原子的ファイル書き出し)
   │      └─ OS のローカルデータディレクトリ/SquirrelNotifier/ratelimit-status/<agentId>.json (`claude` は `claude-code`、他は `--agent` と同じ)
   │         (一時ファイル書き出し + 原子的 rename)
@@ -127,6 +127,7 @@ format = "$symbol[$folder]($folder_style) [$path]($path_style) "
 folder_style = "bold cyan"
 path_style = "dimmed"
 truncation_mode = "middle" # "middle": 中間省略 (/foo/.../bar) / "left": 先頭省略 (.../foo/bar)
+max_length = 0             # パスの最大文字数。0: 端末の幅の半分（自動） / 10〜1000: その文字数で固定
 
 [git_branch]
 symbol = "🌿 "
