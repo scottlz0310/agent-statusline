@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `zip` crate を v9 に更新 (RUSTSEC-2026-0367 / 0368 / 0369)。v9 で `ZipFile::name()` が `Result` を返すようになったため、自己更新の ZIP 展開で不正なエントリ名を `InvalidData` エラーとして伝播する (#73)。
+
 ## [0.4.1] - 2026-10-17
 
 ### Added
