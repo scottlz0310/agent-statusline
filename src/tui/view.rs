@@ -79,7 +79,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     let preview_height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
 
     let props_height = u16::try_from(props_rows(app) + 2).unwrap_or(u16::MAX);
-    let status_rows = status_lines(app, usize::from(area.width));
+    let (status_rows, status_cursor) = status_lines(app, usize::from(area.width));
     let status_height = u16::try_from(status_rows.len()).unwrap_or(1);
     let [header, preview, middle, props, status, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -133,6 +133,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     app.add_hit(props, HitTarget::Pane(Focus::Props));
     draw_props(frame, app, props);
     frame.render_widget(Paragraph::new(status_rows), status);
+    if let Some((column, row)) = status_cursor {
+        frame.set_cursor_position((status.x + column, status.y + row));
+    }
     frame.render_widget(
         Line::from(footer_text(app)).style(Style::default().add_modifier(Modifier::DIM)),
         footer,
@@ -595,6 +598,7 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
     let selected = app.props_index();
     let offset = (selected + 1).saturating_sub(height);
     let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut cursor_at = None;
 
     let rows: Vec<Line> = part
         .props
@@ -631,8 +635,14 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
             let editing = app.input.as_ref().filter(|input| input.target == target);
             if let Some(input) = editing {
                 // 行頭の印（`> `）、項目名、区切りの空白を除いた、入力欄に使える幅
-                let room = usize::from(inner.width).saturating_sub(2 + PROP_KEY_WIDTH + 1);
-                spans.extend(input_spans(&input.value(), input.cursor(), room));
+                let lead = 2 + PROP_KEY_WIDTH + 1;
+                let room = usize::from(inner.width).saturating_sub(lead);
+                let (field, column) = input_spans(&input.value(), input.cursor(), room);
+                spans.extend(field);
+                cursor_at = Some((
+                    inner.x + u16::try_from(lead + column).unwrap_or(u16::MAX),
+                    inner.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                ));
                 return Line::from(spans);
             }
             let current = app.draft.prop_value(part.id, prop.key);
@@ -653,6 +663,9 @@ fn draw_props(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(rows), inner);
+    if let Some(position) = cursor_at {
+        frame.set_cursor_position(position);
+    }
 }
 
 /// 値の表示。文字列は引用符で囲み、前後の空白が見えるようにする
@@ -666,8 +679,9 @@ fn show_value(value: &PropValue) -> String {
 
 /// 入力中の文字列。カーソルの位置の文字（末尾なら空白）を反転する。
 /// `width`（`[` `]` を含む表示幅）に収まらないときは、カーソルが見える範囲へ横にずらし、
-/// 切れた側の端に `…` を出す
-fn input_spans(value: &str, cursor: usize, width: usize) -> Vec<Span<'static>> {
+/// 切れた側の端に `…` を出す。欄の左端からカーソルまでの表示幅も返す
+/// （IME の変換ウィンドウは端末のカーソルの位置に出るので、そこへ端末のカーソルを置く）
+fn input_spans(value: &str, cursor: usize, width: usize) -> (Vec<Span<'static>>, usize) {
     let chars: Vec<char> = value.chars().collect();
     let char_width = |c: char| display_width(&c.to_string());
     let cursor_cell = chars.get(cursor).map_or(1, |c| char_width(*c).max(1));
@@ -730,30 +744,35 @@ fn input_spans(value: &str, cursor: usize, width: usize) -> Vec<Span<'static>> {
         spans.push(Span::styled("…", dim));
     }
     spans.push(Span::raw("]"));
-    spans
+    // `[` の 1 列と、左を切った `…` の 1 列と、カーソルの前の文字
+    (spans, 1 + used - cursor_cell)
 }
 
 /// 状態の行。別名で保存するパスの入力中は 2 行（上: 保存できなかった理由か案内、下: 入力）、
-/// それ以外は 1 行（`status_line`）。理由が入力欄に押し出されて、画面の外に切れないようにする
-fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+/// それ以外は 1 行（`status_line`）。理由が入力欄に押し出されて、画面の外に切れないようにする。
+/// 入力欄があるときは、端末のカーソルを置く位置（状態の領域の左上からの列と行）も返す
+fn status_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
     let Some(input) = &app.input else {
-        return vec![status_line(app)];
+        return (vec![status_line(app)], None);
+    };
+    let field = |label: &'static str, row: u16| {
+        let lead = display_width(label);
+        let room = width.saturating_sub(lead);
+        let (field, column) = input_spans(&input.value(), input.cursor(), room);
+        let mut spans = vec![Span::raw(label)];
+        spans.extend(field);
+        let column = u16::try_from(lead + column).unwrap_or(u16::MAX);
+        (Line::from(spans), Some((column, row)))
     };
     if input.target == InputTarget::PartsSearch {
         // 検索語は、入力のたびに一覧を絞り込む。状態行には、入力欄だけを 1 行で出す
-        let label = "部品を検索: ";
-        let room = width.saturating_sub(display_width(label));
-        let mut spans = vec![Span::raw(label)];
-        spans.extend(input_spans(&input.value(), input.cursor(), room));
-        return vec![Line::from(spans)];
+        let (line, cursor) = field("部品を検索: ", 0);
+        return (vec![line], cursor);
     }
     if input.target != InputTarget::SavePath {
-        return vec![status_line(app)];
+        return (vec![status_line(app)], None);
     }
-    let label = "別名で保存するパス: ";
-    let room = width.saturating_sub(display_width(label));
-    let mut spans = vec![Span::raw(label)];
-    spans.extend(input_spans(&input.value(), input.cursor(), room));
+    let (line, cursor) = field("別名で保存するパス: ", 1);
     let first = match &app.message {
         Some(message) => Line::from(Span::styled(
             format!("受け付けられません: {message}"),
@@ -764,7 +783,7 @@ fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Style::default().add_modifier(Modifier::DIM),
         )),
     };
-    vec![first, Line::from(spans)]
+    (vec![first, line], cursor)
 }
 
 /// 状態行。優先順位は、(1) 確認・選択（未保存で終了、保存の競合）、
@@ -3169,6 +3188,83 @@ mod tests {
         assert!(overlay_text(&overlays[..1]).contains("🌿 main"));
     }
 
+    /// 端末のカーソルの位置のセルが、入力欄の（反転した）カーソルになっているか。
+    /// IME の変換ウィンドウは、端末のカーソルの位置に出る
+    fn terminal_cursor_is_on_input_cursor(app: &App, width: u16, height: u16) -> bool {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| _ = draw(frame, app)).unwrap();
+        let position = terminal.get_cursor_position().unwrap();
+        terminal.backend().buffer()[(position.x, position.y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED)
+    }
+
+    #[test]
+    fn test_terminal_cursor_follows_the_text_input() {
+        // プロパティの行の入力（記号の自由入力）
+        let mut props = props_app("$git_branch");
+        press(&mut props, KeyCode::Down);
+        press(&mut props, KeyCode::Enter);
+        press(&mut props, KeyCode::Char('e'));
+        // 部品の検索（全角文字のあと、途中、短い端末）
+        let mut search = app_with_focus("$directory", Focus::Parts);
+        press(&mut search, KeyCode::Char('/'));
+        // 別名で保存するパス（2 行目）
+        let (mut save, storage) = storage_app("$model");
+        press(&mut save, KeyCode::Char('a'));
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+        press(&mut save, KeyCode::Char('s'));
+        press(&mut save, KeyCode::Char('a'));
+
+        for (name, app) in [("props", &props), ("search", &search), ("save", &save)] {
+            assert!(terminal_cursor_is_on_input_cursor(app, 120, 40), "{name}");
+        }
+        for (name, keys) in [
+            (
+                "search-wide",
+                vec![KeyCode::Char('あ'), KeyCode::Char('い')],
+            ),
+            (
+                "search-moved",
+                vec![KeyCode::Char('a'), KeyCode::Char('b'), KeyCode::Left],
+            ),
+            (
+                "search-long",
+                "x".repeat(200).chars().map(KeyCode::Char).collect(),
+            ),
+        ] {
+            for code in keys {
+                press(&mut search, code);
+            }
+            for width in [120, 40] {
+                assert!(
+                    terminal_cursor_is_on_input_cursor(&search, width, 40),
+                    "{name}/{width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_input_spans_report_where_the_cursor_is() {
+        // 反転した文字の直前までの表示幅が、カーソルの列と一致する（左右を切る場合と全角を含む）
+        for value in ["", "abc", "あいうえおかきくけこ", "ab🌿cd", &"x".repeat(60)] {
+            let length = value.chars().count();
+            for width in [4, 8, 12, 30] {
+                for cursor in 0..=length {
+                    let (spans, column) = input_spans(value, cursor, width);
+                    let before: usize = spans
+                        .iter()
+                        .take_while(|span| !span.style.add_modifier.contains(Modifier::REVERSED))
+                        .map(|span| display_width(&span.content))
+                        .sum();
+                    assert_eq!(column, before, "{value:?}/{width}/{cursor}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_invalid_input_shows_the_reason_and_keeps_the_last_good_preview() {
         let mut app = props_app("$git_branch");
@@ -3258,7 +3354,7 @@ mod tests {
             ("wide-cursor-on-a-wide-char", wide, 5, 8, "[…おか…]", "か"),
         ];
         for (name, value, cursor, width, expected, reversed) in cases {
-            let (text, at) = flatten(&input_spans(value, cursor, width));
+            let (text, at) = flatten(&input_spans(value, cursor, width).0);
             assert_eq!(text, expected, "{name}");
             assert_eq!(at, reversed, "{name}: 反転する文字");
             assert!(
@@ -3272,7 +3368,7 @@ mod tests {
     fn test_input_spans_survive_tiny_widths() {
         for width in 0..8 {
             for cursor in 0..6 {
-                let spans = input_spans("あいabc🌿", cursor, width);
+                let (spans, _) = input_spans("あいabc🌿", cursor, width);
                 let (_, at) = flatten(&spans);
                 assert!(!at.is_empty(), "{width}/{cursor}: カーソルが消える");
             }

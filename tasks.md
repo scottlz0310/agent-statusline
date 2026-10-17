@@ -99,3 +99,4 @@
   - [x] #79 マウス操作への対応
   - [x] 実機確認（Windows。Windows Terminal・VS Code。結果は `docs/config-tui-verification-windows.md`。IME の表示位置は #94）
   - [x] 実機確認（Ubuntu。Windows で確認できなかった項目。Xvfb 上の `xterm`。結果は `docs/config-tui-verification-ubuntu.md`。GNOME Terminal 固有の見え方は未確認）
+  - [x] #94 日本語 IME の変換ウィンドウを入力欄の位置に出す（入力中の端末のカーソルの位置）
