@@ -97,3 +97,5 @@
   - [x] #80 配置領域の縦・横スクロール
   - [x] #78 スタイル（色・装飾）のトグル選択
   - [x] #79 マウス操作への対応
+  - [x] 実機確認（Windows。Windows Terminal・VS Code。結果は `docs/config-tui-verification-windows.md`。IME の表示位置は #94）
+  - [ ] 実機確認（ネイティブ Ubuntu。Windows で確認できなかった項目を含む）
