@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::editor::diff::{self, Diff, DiffMode};
 use crate::editor::draft::{Draft, PropError};
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
@@ -177,6 +178,57 @@ impl IssuesView {
     }
 }
 
+/// 差分の比べる元
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffBase {
+    /// 最後に保存（または読み込み）した内容
+    Saved,
+    /// 競合したときの、ディスク上の今の内容。`exists` が偽なら、外部で削除されている
+    Disk { exists: bool },
+}
+
+/// 差分の表示。`t` で保存済みとの差分を、保存の競合のときは `d` でディスク上の内容との差分を開く。
+/// 開いた時点の内容を固定して比べる（開いている間、下書きは変わらない）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffView {
+    pub base: DiffBase,
+    old: String,
+    new: String,
+    pub mode: DiffMode,
+    scroll: usize,
+    /// 描画が求めた、スクロールできる上限（行数が高さを超える分）
+    max_scroll: Cell<usize>,
+}
+
+impl DiffView {
+    fn new(base: DiffBase, old: String, new: String) -> Self {
+        Self {
+            base,
+            old,
+            new,
+            mode: DiffMode::Changes,
+            scroll: 0,
+            max_scroll: Cell::new(0),
+        }
+    }
+
+    pub fn diff(&self) -> Diff {
+        diff::diff(&self.old, &self.new, self.mode)
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// 描画が、行数と高さから求めた上限を伝える
+    pub fn set_max_scroll(&self, max_scroll: usize) {
+        self.max_scroll.set(max_scroll);
+    }
+}
+
+/// 差分で `PageUp` / `PageDown` が動かす行数
+const DIFF_PAGE: usize = 10;
+
 /// 画面の下に出す確認・選択の状態。`Normal` 以外のとき、キーはその選択に使われる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -206,6 +258,8 @@ pub struct App {
     pub picker: Option<Picker>,
     /// 検証結果の一覧（開いているとき）
     pub issues_view: Option<IssuesView>,
+    /// 差分の表示（開いているとき）
+    pub diff_view: Option<DiffView>,
     /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
     pub message: Option<String>,
     /// 直前の操作の結果の知らせ（保存した、など。次のキー入力で消える）
@@ -260,6 +314,7 @@ impl App {
             input: None,
             picker: None,
             issues_view: None,
+            diff_view: None,
             message: None,
             scenario_index: 0,
             width_index: 0,
@@ -443,6 +498,10 @@ impl App {
             self.handle_issues_key(key.code);
             return;
         }
+        if self.diff_view.is_some() {
+            self.handle_diff_key(key.code);
+            return;
+        }
         if self.mode != Mode::Normal {
             self.handle_mode_key(key.code);
             return;
@@ -468,6 +527,13 @@ impl App {
             KeyCode::BackTab => self.set_focus(self.focus.previous()),
             KeyCode::Char('u') => self.draft.undo(),
             KeyCode::Char('v') => self.issues_view = Some(IssuesView::default()),
+            KeyCode::Char('t') => {
+                self.diff_view = Some(DiffView::new(
+                    DiffBase::Saved,
+                    self.saved_toml.clone(),
+                    self.draft.to_toml(),
+                ));
+            }
             code => match self.focus {
                 Focus::Preview => self.handle_preview_key(code),
                 Focus::Layout => self.handle_layout_key(code, key.modifiers),
@@ -523,6 +589,47 @@ impl App {
         }
     }
 
+    /// 差分のキー。`↑↓` / `PageUp` / `PageDown` / `Home` / `End` でスクロールし、`f` で変更箇所と全文を切り替え、
+    /// `Esc` / `t` / `d` で閉じる
+    fn handle_diff_key(&mut self, key: KeyCode) {
+        let Some(view) = self.diff_view.as_mut() else {
+            return;
+        };
+        let max = view.max_scroll.get();
+        match key {
+            KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
+            KeyCode::Down => view.scroll = (view.scroll + 1).min(max),
+            KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(DIFF_PAGE),
+            KeyCode::PageDown => view.scroll = (view.scroll + DIFF_PAGE).min(max),
+            KeyCode::Home => view.scroll = 0,
+            KeyCode::End => view.scroll = max,
+            KeyCode::Char('f') => {
+                view.mode = view.mode.toggled();
+                view.scroll = 0;
+            }
+            KeyCode::Esc | KeyCode::Char('t' | 'd') => self.diff_view = None,
+            _ => {}
+        }
+    }
+
+    /// 保存の競合のとき、ディスク上の今の内容と下書きの差分を開く。
+    /// 読めないときは、理由を示して競合の選択に戻る
+    fn open_disk_diff(&mut self) {
+        match self.storage.read(self.source_path()) {
+            Ok(disk) => {
+                let exists = disk.is_some();
+                self.diff_view = Some(DiffView::new(
+                    DiffBase::Disk { exists },
+                    disk.unwrap_or_default(),
+                    self.draft.to_toml(),
+                ));
+            }
+            Err(err) => {
+                self.message = Some(format!("ディスク上の内容を読めません: {err}"));
+            }
+        }
+    }
+
     /// 確認・選択の状態のキー。選択肢以外のキーは、何もせずに戻る
     fn handle_mode_key(&mut self, key: KeyCode) {
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
@@ -533,6 +640,11 @@ impl App {
                 if self.save() {
                     self.should_quit = true;
                 }
+            }
+            // 差分を見るときは、競合の選択を残す（差分を閉じると、選択に戻る）
+            (Mode::Conflict(kind), KeyCode::Char('d')) => {
+                self.mode = Mode::Conflict(kind);
+                self.open_disk_diff();
             }
             (Mode::Conflict(_), KeyCode::Char('r')) => self.reload(),
             (Mode::Conflict(_), KeyCode::Char('a')) => {
@@ -884,6 +996,7 @@ fn cycle_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::diff::LineKind;
     use crate::editor::layout_edit::Cursor;
 
     fn app(format: &str) -> App {
@@ -1862,6 +1975,205 @@ mod tests {
         assert!(!app.should_quit);
         assert!(app.is_dirty(), "編集は残る");
         assert_eq!(storage.0.borrow().reloads.len(), 0);
+    }
+
+    fn diff_lines(app: &App) -> Vec<(LineKind, String)> {
+        app.diff_view
+            .as_ref()
+            .expect("差分が開いている")
+            .diff()
+            .lines
+            .into_iter()
+            .map(|line| (line.kind, line.text))
+            .collect()
+    }
+
+    #[test]
+    fn test_t_opens_the_diff_against_the_saved_text_and_closes_it() {
+        let (mut app, _storage) = app_with_storage("$model");
+        press(&mut app, KeyCode::Char('t'));
+        let view = app.diff_view.as_ref().expect("開く");
+        assert_eq!(view.base, DiffBase::Saved);
+        assert!(!view.diff().has_changes(), "変更がなければ、差分は空");
+
+        // 閉じて、配置を変えてから開き直すと、保存済みとの差が出る
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.diff_view, None);
+        assert!(!app.should_quit, "Esc は、差分を閉じるだけ");
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('t'));
+        let diff = app.diff_view.as_ref().unwrap().diff();
+        assert!(diff.has_changes());
+        assert!(
+            diff_lines(&app)
+                .iter()
+                .any(|(kind, _)| *kind == LineKind::Added),
+            "{:?}",
+            diff_lines(&app)
+        );
+        // `t` でも閉じる
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.diff_view, None);
+    }
+
+    #[test]
+    fn test_saving_resets_the_diff_baseline() {
+        let (mut app, _storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('s'));
+        assert!(!app.is_dirty());
+        press(&mut app, KeyCode::Char('t'));
+        assert!(!app.diff_view.as_ref().unwrap().diff().has_changes());
+    }
+
+    #[test]
+    fn test_diff_view_keys_scroll_toggle_the_mode_and_swallow_other_keys() {
+        let (mut app, _storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.diff_view.as_ref().unwrap().mode, DiffMode::Changes);
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.diff_view.as_ref().unwrap().mode, DiffMode::Full);
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.diff_view.as_ref().unwrap().mode, DiffMode::Changes);
+
+        // 描画がスクロールの上限を伝えるまで（まだ描画していない）、スクロールは 0 のまま
+        for key in [KeyCode::Down, KeyCode::PageDown, KeyCode::End] {
+            press(&mut app, key);
+            assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 0);
+        }
+        // 上限が伝わると、その範囲で動く
+        app.diff_view.as_ref().unwrap().set_max_scroll(25);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 1);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 11);
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 25);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 25, "上限で止まる");
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 15);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 0);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 0);
+        // 表示の形を切り替えると、先頭に戻る
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.diff_view.as_ref().unwrap().scroll(), 0);
+
+        // 開いている間は、`q` `s` `u` `v` が効かない（終了も保存も元に戻すも検証結果も開かない）
+        let saved_before = app.is_dirty();
+        for key in [
+            KeyCode::Char('q'),
+            KeyCode::Char('s'),
+            KeyCode::Char('u'),
+            KeyCode::Char('v'),
+        ] {
+            press(&mut app, key);
+            assert!(app.diff_view.is_some());
+            assert!(!app.should_quit);
+            assert_eq!(app.issues_view, None);
+        }
+        assert_eq!(app.is_dirty(), saved_before);
+    }
+
+    #[test]
+    fn test_t_is_a_character_while_typing() {
+        let mut app = props_app("model");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.diff_view, None);
+        assert!(app.input.as_ref().unwrap().value().ends_with('t'));
+    }
+
+    #[test]
+    fn test_conflict_d_shows_the_disk_content_and_returns_to_the_choices() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+            state.disk = Some("format = \"$plan\"\n".to_string());
+        }
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Changed));
+
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.mode,
+            Mode::Conflict(ConflictKind::Changed),
+            "選択は残る"
+        );
+        let view = app.diff_view.as_ref().expect("差分が開く");
+        assert_eq!(view.base, DiffBase::Disk { exists: true });
+        let lines = diff_lines(&app);
+        // ディスク上にだけある行は `-`、下書きにある行は `+`
+        assert!(
+            lines.contains(&(LineKind::Removed, "format = \"$plan\"".to_string())),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|(kind, text)| *kind == LineKind::Added && text.contains("model")),
+            "{lines:?}"
+        );
+        assert_eq!(storage.0.borrow().reads, [PathBuf::from("test.toml")]);
+
+        // 閉じると、競合の選択に戻る（まだ何も失っていない）。続けて `r` で再読み込みできる
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.diff_view, None);
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Changed));
+        assert!(app.is_dirty());
+        storage.0.borrow_mut().reload_to = Some(loaded("format = \"$plan\"\n"));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(format(&app), "$plan");
+    }
+
+    #[test]
+    fn test_conflict_d_when_the_file_was_deleted_or_cannot_be_read() {
+        let (mut app, storage) = app_with_storage("$model");
+        make_dirty(&mut app);
+        storage.0.borrow_mut().save_error = Some(SaveError::Conflict(ConflictKind::Deleted));
+        press(&mut app, KeyCode::Char('s'));
+
+        // ディスクに無い: 比べる元は空で、下書きの全行が `+`
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.diff_view.as_ref().unwrap().base,
+            DiffBase::Disk { exists: false }
+        );
+        let lines = diff_lines(&app);
+        assert!(lines.iter().all(|(kind, _)| *kind != LineKind::Removed));
+        assert!(lines.iter().any(|(kind, _)| *kind == LineKind::Added));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.diff_view, None);
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Deleted));
+
+        // 読めない: 理由を示して、差分は開かず、競合の選択に残る
+        storage.0.borrow_mut().read_error = Some("permission denied".to_string());
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.diff_view, None);
+        assert_eq!(app.mode, Mode::Conflict(ConflictKind::Deleted));
+        let message = app.message.clone().expect("理由が示される");
+        assert!(
+            message.contains("ディスク上の内容を読めません"),
+            "{message}"
+        );
+        assert!(message.contains("permission denied"), "{message}");
+    }
+
+    #[test]
+    fn test_d_still_deletes_in_the_layout_when_there_is_no_conflict() {
+        let (mut app, _storage) = app_with_storage("$model $plan");
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.diff_view, None);
+        assert_eq!(format(&app), " $plan", "d は配置の削除のまま");
     }
 
     #[test]
