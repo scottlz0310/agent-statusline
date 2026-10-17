@@ -137,7 +137,7 @@ fn footer_text(app: &App) -> &'static str {
         return "記号を選ぶ  ↑↓: 選ぶ  Enter: 決定  e: 自由に入力  Esc: 閉じる";
     }
     if app.issues_view.is_some() {
-        return "検証結果  ↑↓: 選ぶ  Esc / v: 閉じる";
+        return "検証結果  ↑↓: 選ぶ（長い項目は 1 行ずつスクロール）  Esc / v: 閉じる";
     }
     // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
@@ -592,11 +592,12 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
         true,
     );
     let inner = block.inner(area);
-    frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, area);
         return;
     }
     if issues.is_empty() {
+        frame.render_widget(block, area);
         frame.render_widget(Paragraph::new("問題はありません"), inner);
         return;
     }
@@ -643,12 +644,27 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // 選んでいる項目が全部見える位置までスクロールする（収まらないときは、先頭の行を優先する）
     let height = usize::from(inner.height);
-    let offset = selected_rows
-        .end
-        .saturating_sub(height)
-        .min(selected_rows.start);
+    // 選んでいる項目が一覧の高さを超えるときは、項目の中を行単位でスクロールする（`↑↓`）。
+    // 超える行数を App に伝え、`↑↓` が、項目の末尾までスクロールしてから次の項目へ進めるようにする
+    let max_scroll = selected_rows.len().saturating_sub(height);
+    view.set_max_scroll(max_scroll);
+    let scroll = view.scroll().min(max_scroll);
+    // 収まる項目は全部見える位置まで、収まらない項目は先頭の行から（スクロールした分だけ後ろへ）出す
+    let offset = if max_scroll > 0 {
+        selected_rows.start + scroll
+    } else {
+        selected_rows
+            .end
+            .saturating_sub(height)
+            .min(selected_rows.start)
+    };
+    let block = if scroll < max_scroll {
+        block.title_bottom(" ↓ 続きがあります ")
+    } else {
+        block
+    };
+    frame.render_widget(block, area);
     let visible: Vec<Line> = lines.into_iter().skip(offset).take(height).collect();
     frame.render_widget(Paragraph::new(visible), inner);
 }
@@ -1154,6 +1170,73 @@ mod tests {
         assert!(last.contains("▶ 警告 unknown29"), "{last}");
         // 一覧は末尾へスクロールした（状態行には、先頭の問題が出続ける）
         assert!(!last.contains("警告 unknown00"), "{last}");
+    }
+
+    #[test]
+    fn test_issues_view_scrolls_inside_an_item_taller_than_the_list() {
+        // 一覧の高さを超える 1 件（折り返すと十数行になる長いキー）と、その次の 1 件
+        let long_key = format!("{}END_OF_KEY", "a".repeat(800));
+        let toml = format!("[\"{long_key}\"]\nx = 1\n\n[zzz_next]\nx = 1\n");
+        let mut app = app_from_toml(&toml);
+        press(&mut app, KeyCode::Char('v'));
+
+        // 状態行にも先頭の問題は出るので、一覧の枠の内側だけを見る
+        let list = |app: &App| {
+            let shown = text(app, 80, 24);
+            let lines: Vec<&str> = shown.lines().collect();
+            let top = lines.iter().position(|l| l.contains("検証結果 ─")).unwrap();
+            let bottom = lines[top..]
+                .iter()
+                .position(|l| l.starts_with('└'))
+                .unwrap();
+            lines[top..=top + bottom].join("\n")
+        };
+
+        let first = list(&app);
+        assert!(first.contains("▶ 警告 aaaa"), "{first}");
+        assert!(!first.contains("END_OF_KEY"), "{first}");
+        assert!(first.contains("↓ 続きがあります"), "{first}");
+
+        // ↓ で項目の中を 1 行ずつ進み、末尾（END_OF_KEY）に届く。まだ次の項目へは進まない
+        let mut saw_end_of_key = false;
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Down);
+            let shown = list(&app);
+            assert!(!shown.contains("zzz_next"), "{shown}");
+            saw_end_of_key |= shown.contains("END_OF_KEY");
+            if !shown.contains("↓ 続きがあります") {
+                break;
+            }
+        }
+        // 長いキーの末尾も、その後のメッセージの末尾も、順に見える
+        assert!(saw_end_of_key);
+        let end = list(&app);
+        assert!(end.contains("テーブルです"), "{end}");
+        assert!(!end.contains("↓ 続きがあります"), "{end}");
+
+        // 末尾まで行ってから ↓ を押すと、次の項目へ進む（先頭から出る）
+        press(&mut app, KeyCode::Down);
+        let next = list(&app);
+        assert!(next.contains("▶ 警告 zzz_next"), "{next}");
+
+        // ↑ で戻ると、前の項目の先頭から出て、↑ で上へ戻れる
+        press(&mut app, KeyCode::Up);
+        let back = list(&app);
+        assert!(back.contains("▶ 警告 aaaa"), "{back}");
+        assert!(!back.contains("END_OF_KEY"), "{back}");
+        for _ in 0..40 {
+            if !list(&app).contains("↓ 続きがあります") {
+                break;
+            }
+            press(&mut app, KeyCode::Down);
+        }
+        assert!(list(&app).contains("テーブルです"));
+        for _ in 0..40 {
+            press(&mut app, KeyCode::Up);
+        }
+        let top = list(&app);
+        assert!(top.contains("▶ 警告 aaaa"), "{top}");
+        assert!(!top.contains("END_OF_KEY"), "{top}");
     }
 
     #[test]

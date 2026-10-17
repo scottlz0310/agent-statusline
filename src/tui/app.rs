@@ -1,5 +1,6 @@
 //! 設定 TUI の状態と、キー入力による状態遷移（画面に依存しない）。
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -150,14 +151,27 @@ impl Picker {
 }
 
 /// 検証結果（エラー・警告）の一覧の表示。`v` で開く。状態行には先頭の 1 件しか出ないので、全件を見るために使う
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IssuesView {
     index: usize,
+    /// 選んでいる項目の中で、スクロールした行数。項目が一覧の高さを超えるときだけ使う
+    scroll: usize,
+    /// 選んでいる項目が一覧の高さを超える行数（描画のたびに更新する）。`↑↓` が項目の中をスクロールできる上限
+    max_scroll: Cell<usize>,
 }
 
 impl IssuesView {
-    pub fn index(self) -> usize {
+    pub fn index(&self) -> usize {
         self.index
+    }
+
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// 描画が、選んでいる項目の高さから求めた上限を伝える
+    pub fn set_max_scroll(&self, max_scroll: usize) {
+        self.max_scroll.set(max_scroll);
     }
 }
 
@@ -446,15 +460,21 @@ impl App {
         }
     }
 
-    /// 検証結果の一覧のキー。`↑↓` で選び、`Esc` / `v` で閉じる
+    /// 検証結果の一覧のキー。`↑↓` で選び、`Esc` / `v` で閉じる。
+    /// 選んでいる項目が一覧の高さを超えるときは、`↑↓` が項目の中を 1 行ずつスクロールし、端まで行ってから隣の項目へ進む
     fn handle_issues_key(&mut self, key: KeyCode) {
         let last = self.draft.issues().len().saturating_sub(1);
         let Some(view) = self.issues_view.as_mut() else {
             return;
         };
         match key {
+            KeyCode::Up if view.scroll > 0 => view.scroll -= 1,
             KeyCode::Up => view.index = view.index.saturating_sub(1),
-            KeyCode::Down => view.index = (view.index + 1).min(last),
+            KeyCode::Down if view.scroll < view.max_scroll.get() => view.scroll += 1,
+            KeyCode::Down if view.index < last => {
+                view.index += 1;
+                view.scroll = 0;
+            }
             KeyCode::Esc | KeyCode::Char('v') => self.issues_view = None,
             _ => {}
         }
@@ -1481,7 +1501,7 @@ mod tests {
         assert_eq!(app.issues_view, None);
 
         press(&mut app, KeyCode::Char('v'));
-        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        assert_eq!(app.issues_view.as_ref().map(IssuesView::index), Some(0));
         // 一覧が開いている間は、`q` も `s` も `u` も効かない（終了も保存もしない）
         for key in [KeyCode::Char('q'), KeyCode::Char('s'), KeyCode::Char('u')] {
             press(&mut app, key);
@@ -1491,18 +1511,18 @@ mod tests {
         }
         // 範囲の外へは進まない
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        assert_eq!(app.issues_view.as_ref().map(IssuesView::index), Some(0));
         for _ in 0..5 {
             press(&mut app, KeyCode::Down);
         }
-        assert_eq!(app.issues_view.map(IssuesView::index), Some(1));
+        assert_eq!(app.issues_view.as_ref().map(IssuesView::index), Some(1));
 
         // `Esc` で閉じる（終了しない）。もう一度 `v` で開くと、先頭から
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.issues_view, None);
         assert!(!app.should_quit);
         press(&mut app, KeyCode::Char('v'));
-        assert_eq!(app.issues_view.map(IssuesView::index), Some(0));
+        assert_eq!(app.issues_view.as_ref().map(IssuesView::index), Some(0));
         press(&mut app, KeyCode::Char('v'));
         assert_eq!(app.issues_view, None);
     }
