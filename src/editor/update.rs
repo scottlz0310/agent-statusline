@@ -8,6 +8,7 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 use crate::editor::layout::Layout;
 use crate::engine::config::Config;
 use crate::engine::parts::{PropKind, find};
+use crate::modules::directory::{MAX_PATH_LEN, MIN_PATH_LEN, is_valid_max_length};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropValue {
@@ -59,6 +60,11 @@ pub enum UpdateError {
         key: String,
         value: i64,
     },
+    InvalidLength {
+        part: String,
+        key: String,
+        value: i64,
+    },
     InvalidChoice {
         part: String,
         key: String,
@@ -83,6 +89,10 @@ impl fmt::Display for UpdateError {
             Self::OutOfRange { part, key, value } => {
                 write!(f, "{part}.{key} は 0〜100 の整数が必要です: {value}")
             }
+            Self::InvalidLength { part, key, value } => write!(
+                f,
+                "{part}.{key} は 0（自動）または {MIN_PATH_LEN}〜{MAX_PATH_LEN} の整数が必要です: {value}"
+            ),
             Self::InvalidChoice {
                 part,
                 key,
@@ -182,7 +192,13 @@ fn check_value(part: &str, key: &str, value: &PropValue) -> Result<(), UpdateErr
             key: key.to_string(),
             value: *v,
         }),
-        (PropKind::Threshold, _) => Err(mismatch("整数")),
+        (PropKind::Length, PropValue::Int(v)) if is_valid_max_length(*v) => Ok(()),
+        (PropKind::Length, PropValue::Int(v)) => Err(UpdateError::InvalidLength {
+            part: part.to_string(),
+            key: key.to_string(),
+            value: *v,
+        }),
+        (PropKind::Threshold | PropKind::Length, _) => Err(mismatch("整数")),
         (PropKind::Choice(choices), PropValue::Str(v)) if !choices.contains(&v.as_str()) => {
             Err(UpdateError::InvalidChoice {
                 part: part.to_string(),
@@ -478,6 +494,39 @@ mod tests {
             assert_eq!(doc.to_string(), expected, "{name}");
         }
     }
+    #[test]
+    fn test_set_prop_max_length() {
+        let defaults = DefaultValues::new();
+        let invalid = |value| UpdateError::InvalidLength {
+            part: "directory".into(),
+            key: "max_length".into(),
+            value,
+        };
+        // (名前, 値, 期待する結果)
+        let cases = [
+            ("auto", PropValue::Int(0), Ok(())),
+            ("min", PropValue::Int(10), Ok(())),
+            ("max", PropValue::Int(1000), Ok(())),
+            ("too-short", PropValue::Int(9), Err(invalid(9))),
+            ("negative", PropValue::Int(-1), Err(invalid(-1))),
+            ("too-long", PropValue::Int(1001), Err(invalid(1001))),
+            (
+                "type",
+                s("40"),
+                Err(UpdateError::KindMismatch {
+                    part: "directory".into(),
+                    key: "max_length".into(),
+                    expected: "整数",
+                }),
+            ),
+        ];
+        for (name, value, expected) in cases {
+            let mut doc = parse("");
+            let result = set_prop(&mut doc, &defaults, "directory", "max_length", &value);
+            assert_eq!(result, expected, "{name}");
+        }
+    }
+
     #[test]
     fn test_set_prop_errors() {
         let defaults = DefaultValues::new();

@@ -12,6 +12,7 @@ use crate::editor::save::{ConflictKind, SaveError};
 use crate::editor::update::PropValue;
 use crate::engine::config::Config;
 use crate::engine::parts::{PartSpec, PropKind, find};
+use crate::modules::directory::{MAX_PATH_LEN, MIN_PATH_LEN};
 use crate::preview::scenario::Scenario;
 use crate::preview::width::Overflow;
 use crate::tui::palette::{self, PaletteItem};
@@ -35,6 +36,9 @@ const WIDTHS: [WidthChoice; 4] = [
 /// 閾値の増減の幅。`Shift` を押しているときは、大きい方
 const THRESHOLD_STEP: i64 = 1;
 const THRESHOLD_BIG_STEP: i64 = 10;
+/// 文字数の上限の増減の幅
+const LENGTH_STEP: usize = 1;
+const LENGTH_BIG_STEP: usize = 10;
 
 /// キー入力の宛先。`Tab` で、配置 → プロパティ → 部品一覧 → プレビューの順に切り替える
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,6 +632,17 @@ impl App {
                     _ => None,
                 }
             }
+            (PropKind::Length, PropValue::Int(value)) => {
+                let step = if modifiers.contains(KeyModifiers::SHIFT) {
+                    LENGTH_BIG_STEP
+                } else {
+                    LENGTH_STEP
+                };
+                let value = usize::try_from(value).unwrap_or(0);
+                step_length(value, key, step)
+                    .and_then(|v| i64::try_from(v).ok())
+                    .map(PropValue::Int)
+            }
             // 記号は、候補から選ぶ（絵文字を入力できない環境がある）。自由に入力するには、候補の一覧で `e`
             (PropKind::Symbol, PropValue::Str(value)) if key == KeyCode::Enter => {
                 let default = match self.draft.default_value(part.id, prop.key) {
@@ -694,6 +709,17 @@ impl App {
             KeyCode::End => input.cursor = input.chars.len(),
             _ => {}
         }
+    }
+}
+
+/// 文字数の上限の増減。0（自動）と `MIN_PATH_LEN` の間の値は受け付けないので、飛び越える
+fn step_length(value: usize, key: KeyCode, step: usize) -> Option<usize> {
+    match key {
+        KeyCode::Left if value <= MIN_PATH_LEN => Some(0),
+        KeyCode::Left => Some(value.saturating_sub(step).max(MIN_PATH_LEN)),
+        KeyCode::Right if value == 0 => Some(MIN_PATH_LEN),
+        KeyCode::Right => Some((value + step).min(MAX_PATH_LEN)),
+        _ => None,
     }
 }
 
@@ -1128,6 +1154,45 @@ mod tests {
             app.draft.prop_value("context", "threshold_critical"),
             Some(PropValue::Int(100))
         );
+    }
+
+    #[test]
+    fn test_step_length() {
+        // (名前, 現在の値, キー, 増減の幅, 期待する値)。型は usize
+        let cases = [
+            ("auto to min", 0, KeyCode::Right, 1, Some(10)),
+            ("auto stays", 0, KeyCode::Left, 1, Some(0)),
+            ("min to auto", 10, KeyCode::Left, 1, Some(0)),
+            ("big step stops at min", 15, KeyCode::Left, 10, Some(10)),
+            ("step down", 40, KeyCode::Left, 1, Some(39)),
+            ("step up", 40, KeyCode::Right, 1, Some(41)),
+            ("big step up", 40, KeyCode::Right, 10, Some(50)),
+            ("stops at max", 995, KeyCode::Right, 10, Some(1000)),
+            ("other key", 40, KeyCode::Enter, 1, None),
+        ];
+        for (name, value, key, step, expected) in cases {
+            assert_eq!(step_length(value, key, step), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_max_length_prop_steps_through_the_ui() {
+        let mut app = props_app("directory");
+        select_prop(&mut app, "max_length");
+        let value = |app: &App| app.draft.prop_value("directory", "max_length");
+        assert_eq!(value(&app), Some(PropValue::Int(0)));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(value(&app), Some(PropValue::Int(10)));
+        press_shift(&mut app, KeyCode::Right);
+        assert_eq!(value(&app), Some(PropValue::Int(20)));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(value(&app), Some(PropValue::Int(19)));
+        // 0（自動）まで戻れて、9 以下の値は経由しない
+        press_shift(&mut app, KeyCode::Left);
+        assert_eq!(value(&app), Some(PropValue::Int(10)));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(value(&app), Some(PropValue::Int(0)));
+        assert!(app.message.is_none());
     }
 
     #[test]

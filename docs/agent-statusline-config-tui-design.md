@@ -126,11 +126,12 @@ PartSpec {
     // label, category（§6.2）, visibility（§6.5）, sample
 }
 PropSpec { key, kind }  // default は Config::default() から得る。suggestions は TUI で追加する
-kind = Symbol | Style | Threshold | Text | Bool | Separator | Choice(values) | Format(placeholders)
+kind = Symbol | Style | Threshold | Length | Text | Bool | Separator | Choice(values) | Format(placeholders)
 ```
 
 - `format` 文字列の変数は、部品単位ではなくキー単位で持つ（`Format(placeholders)`）。`review` は `format`・`active_format`・`waiting_format` で使える変数が異なるため。
 - `Threshold` の範囲は 0〜100 の整数。`threshold_warning < threshold_critical` の検証は編集サービス（§5.3）で行う。
+- `Length` は文字数の上限（`[directory] max_length`）。0 は「端末の幅の半分」（自動）、それ以外は 10〜1000 の整数で、0 と 10 の間の値は受け付けない（TUI の `←` `→` はその間を飛び越える）。0 以外のときは端末の幅を見ない。
 - `[directory] truncation_mode` は `left`（先頭側を省略: `.../foo/bar`）と `middle`（中間を省略: `/foo/.../bar`、既定）から選ぶ（`Choice`）。認識できない値でも描画は止めず `middle` として扱い、保存時の検証がエラーにする。
 
 レジストリには、次の整合を保つテストを置く。

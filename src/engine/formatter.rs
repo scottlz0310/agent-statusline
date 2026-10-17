@@ -26,7 +26,12 @@ pub fn render_directory(
         .cwd
         .file_name()
         .map_or_else(|| ".".to_string(), |f| f.to_string_lossy().to_string());
-    let path_max = (terminal_width / 2).max(40);
+    // max_length を指定したときは、端末の幅の取得に左右されないよう、幅を見ない
+    let path_max = if cfg.max_length > 0 {
+        cfg.max_length
+    } else {
+        terminal_width / 2
+    };
     // 認識できない値でも描画は止めない（保存時の検証が、誤りを知らせる）
     let mode = TruncationMode::parse(&cfg.truncation_mode).unwrap_or(TruncationMode::Middle);
     let short_path = format_path(&state.cwd, path_max, mode);
@@ -809,6 +814,41 @@ mod tests {
                 "{mode}"
             );
             assert_eq!(rendered, expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn test_render_directory_follows_terminal_width() {
+        const PATH: &str = "/home/dev/src/very/deeply/nested/workspace/directory/for/the/project";
+        let state = StatuslineState {
+            cwd: PathBuf::from(PATH),
+            ..Default::default()
+        };
+        // (名前, 端末の幅, max_length, 省略後の最大文字数。None は省略しない)
+        let cases = [
+            ("width-80", 80, 0, Some(40)),
+            ("width-120", 120, 0, Some(60)),
+            ("narrow-follows-width", 60, 0, Some(30)),
+            ("narrowest-truncating", 20, 0, Some(10)),
+            ("too-narrow-keeps-path", 15, 0, None),
+            ("max-length-on-narrow", 80, 25, Some(25)),
+            ("max-length-ignores-width", 200, 25, Some(25)),
+            ("max-length-longer-than-path", 80, 100, None),
+        ];
+        for (name, width, max_length, limit) in cases {
+            let cfg = DirectoryConfig {
+                format: "$path".to_string(),
+                max_length,
+                ..Default::default()
+            };
+            let rendered = render_directory(&cfg, &state, width);
+            match limit {
+                Some(limit) => {
+                    assert_ne!(rendered, PATH, "{name}: 省略される");
+                    assert!(rendered.chars().count() <= limit, "{name}: {rendered}");
+                }
+                None => assert_eq!(rendered, PATH, "{name}"),
+            }
         }
     }
 

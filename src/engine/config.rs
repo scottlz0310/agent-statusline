@@ -84,6 +84,10 @@ pub struct DirectoryConfig {
     #[serde(default = "default_truncation_mode")]
     pub truncation_mode: String,
 
+    /// パスの最大文字数。0 は端末の幅の半分（自動）
+    #[serde(default)]
+    pub max_length: usize,
+
     #[serde(default)]
     pub disabled: bool,
 }
@@ -112,6 +116,7 @@ impl Default for DirectoryConfig {
             folder_style: default_directory_folder_style(),
             path_style: default_directory_path_style(),
             truncation_mode: default_truncation_mode(),
+            max_length: 0,
             disabled: false,
         }
     }

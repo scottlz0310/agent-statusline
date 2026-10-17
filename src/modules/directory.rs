@@ -22,11 +22,22 @@ impl TruncationMode {
     }
 }
 
-/// パスをターミナル幅に合わせて省略する。`max_len` 以下に収まらない短い幅（10 未満）では省略しない
+/// 省略できる上限の最小値。これより短い上限では、省略の結果が読めなくなるので省略しない
+pub const MIN_PATH_LEN: usize = 10;
+
+/// `[directory] max_length` の最大値
+pub const MAX_PATH_LEN: usize = 1000;
+
+/// `[directory] max_length` として受け付ける値。0 は「端末の幅の半分」（自動）
+pub fn is_valid_max_length(value: i64) -> bool {
+    usize::try_from(value).is_ok_and(|v| v == 0 || (MIN_PATH_LEN..=MAX_PATH_LEN).contains(&v))
+}
+
+/// パスを `max_len` 文字以内に省略する。`max_len` が `MIN_PATH_LEN` 未満のときは省略しない
 pub fn format_path(path: &Path, max_len: usize, mode: TruncationMode) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     let char_count = s.chars().count();
-    if max_len < 10 || char_count <= max_len {
+    if max_len < MIN_PATH_LEN || char_count <= max_len {
         return s;
     }
 

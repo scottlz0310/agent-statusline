@@ -32,6 +32,8 @@ pub enum PropKind {
     Choice(&'static [&'static str]),
     /// 0..=100 の整数
     Threshold,
+    /// 文字数の上限。0（自動）または `MIN_PATH_LEN`〜`MAX_PATH_LEN` の整数
+    Length,
     /// `format` 文字列。`$変数` で使える変数名を持つ
     Format(&'static [&'static str]),
 }
@@ -71,6 +73,7 @@ pub static PARTS: [PartSpec; 10] = [
                 "truncation_mode",
                 PropKind::Choice(&TruncationMode::CHOICES),
             ),
+            prop("max_length", PropKind::Length),
             DISABLED,
         ],
         render: |c, i| render_directory(&c.directory, i.state, i.terminal_width),
@@ -217,6 +220,7 @@ mod tests {
     use super::*;
     use crate::engine::config::DEFAULT_FORMAT;
     use crate::engine::template::{Token, tokenize};
+    use crate::modules::directory::is_valid_max_length;
 
     /// 未知の変数（`$` が固定テキストに残るもの）を含まないこと
     fn unknown_variable(format: &str, placeholders: &[&str]) -> Option<String> {
@@ -277,6 +281,7 @@ mod tests {
                     PropKind::Threshold => {
                         item.as_integer().is_some_and(|v| (0..=100).contains(&v))
                     }
+                    PropKind::Length => item.as_integer().is_some_and(is_valid_max_length),
                     _ => item.is_str(),
                 };
                 assert!(ok, "{}.{} の型: {item:?}", part.id, p.key);
