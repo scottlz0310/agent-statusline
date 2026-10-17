@@ -1,5 +1,6 @@
 //! 設定 TUI の画面。状態（`App`）と設定から、描画だけを行う。
 
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -105,6 +106,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     if app.diff_view.is_some() {
         // 差分も、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
         draw_diff(frame, app, middle);
+    } else if app.history_view.is_some() {
+        draw_history(frame, app, middle);
     } else if app.issues_view.is_some() {
         // 検証結果の一覧は、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
         draw_issues(frame, app, middle);
@@ -146,22 +149,29 @@ fn footer_text(app: &App) -> &'static str {
     if app.issues_view.is_some() {
         return "検証結果  ↑↓: 選ぶ（長い項目は 1 行ずつスクロール）  Esc / v: 閉じる";
     }
-    if app.diff_view.is_some() {
-        return "差分  ↑↓ PageUp PageDown Home End: スクロール  f: 変更箇所/全文  Esc / t / d: 閉じる";
+    if let Some(diff) = &app.diff_view {
+        return if diff.is_restore_preview() {
+            "復元の確認  Enter / y: この世代に置き換える  Esc: 一覧に戻る  ↑↓ PageUp PageDown: スクロール  f: 変更箇所/全文"
+        } else {
+            "差分  ↑↓ PageUp PageDown Home End: スクロール  f: 変更箇所/全文  Esc / t / d: 閉じる"
+        };
+    }
+    if app.history_view.is_some() {
+        return "履歴  ↑↓: 選ぶ  Enter: 差分を見て復元  Esc / H: 閉じる";
     }
     // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
         Focus::Layout => {
-            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  H: 履歴  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
         }
         Focus::Parts => {
-            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: プレビュー  ←→: カテゴリ  /: 検索  Enter: 後ろに追加  i: 前に追加  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  H: 履歴  Tab: 移動  ←→: カテゴリ  /: 検索  Enter: 後ろに追加  i: 前に追加  u: 戻す"
         }
         Focus::Props => {
-            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  H: 履歴  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
         }
         Focus::Preview => {
-            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  H: 履歴  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
         }
     }
 }
@@ -602,12 +612,95 @@ fn neutralize(text: &str) -> String {
 }
 
 /// 差分の題に出す、比べる元の説明
-fn diff_base_label(base: DiffBase) -> &'static str {
+fn diff_base_label(base: DiffBase) -> String {
     match base {
-        DiffBase::Saved => "保存済み → 下書き",
-        DiffBase::Disk { exists: true } => "ディスク上の今の内容 → 下書き",
-        DiffBase::Disk { exists: false } => "（ディスクに無い）→ 下書き",
+        DiffBase::Saved => "保存済み → 下書き".to_string(),
+        DiffBase::Disk { exists: true } => "ディスク上の今の内容 → 下書き".to_string(),
+        DiffBase::Disk { exists: false } => "（ディスクに無い）→ 下書き".to_string(),
+        DiffBase::Generation { recorded_at } => {
+            format!("今の下書き → {} の世代", format_recorded(recorded_at))
+        }
     }
+}
+
+/// 履歴の世代を保存した日時（ローカル時刻）。ファイル名から読めなかったときは、その旨
+fn format_recorded(recorded_at: Option<DateTime<Utc>>) -> String {
+    recorded_at.map_or_else(
+        || "（日時不明）".to_string(),
+        |at| {
+            at.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        },
+    )
+}
+
+/// 履歴の一覧（配置と部品一覧の場所）。新しい順に、日時と、今の下書きからその世代へ変わる行数（`+追加 -削除`）を出す
+fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = &app.history_view else {
+        return;
+    };
+    let block = focus_block(
+        format!(
+            " 履歴 ─ 保存前の世代（新しい順） ─ {} 件 ",
+            view.generations.len()
+        ),
+        true,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if view.generations.is_empty() {
+        let reason = if view.saved_before {
+            "履歴はまだありません（保存すると、保存前の内容が残ります）"
+        } else {
+            "履歴はありません（まだ保存されていません）"
+        };
+        frame.render_widget(Paragraph::new(reason), inner);
+        return;
+    }
+    let height = usize::from(inner.height);
+    let selected = view.index().min(view.generations.len() - 1);
+    let offset = (selected + 1).saturating_sub(height);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let rows: Vec<Line> = view
+        .generations
+        .iter()
+        .zip(&view.changes)
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, (generation, (added, removed)))| {
+            let marker = if index == selected { "> " } else { "  " };
+            let mut spans = vec![
+                Span::raw(marker),
+                Span::raw(format_recorded(generation.recorded_at)),
+                Span::raw("  "),
+            ];
+            if *added + *removed == 0 {
+                spans.push(Span::styled("（今の下書きと同じ）", dim));
+            } else {
+                spans.push(Span::styled(
+                    format!("+{added}"),
+                    Style::default().fg(Color::Green),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("-{removed}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            let line = Line::from(spans);
+            if index == selected {
+                line.style(Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 /// 差分の表示。比べる元（保存済み / ディスク上の今の内容）と下書きの差を、配置と部品一覧の場所いっぱいに出す。
@@ -669,10 +762,18 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     let max_scroll = rows.len().saturating_sub(height);
     view.set_max_scroll(max_scroll);
     let scroll = view.scroll().min(max_scroll);
-    let block = if scroll < max_scroll {
-        block.title_bottom(" ↓ 続きがあります ")
-    } else {
+    // 下の枠の題: 復元の確認なら復元の操作を、続きがあればその旨を出す
+    let mut hints = Vec::new();
+    if view.is_restore_preview() {
+        hints.push("Enter / y: この世代に置き換える（保存はしません）");
+    }
+    if scroll < max_scroll {
+        hints.push("↓ 続きがあります");
+    }
+    let block = if hints.is_empty() {
         block
+    } else {
+        block.title_bottom(format!(" {} ", hints.join(" ─ ")))
     };
     frame.render_widget(block, area);
     let visible: Vec<Line> = rows.into_iter().skip(scroll).take(height).collect();
@@ -1479,6 +1580,106 @@ mod tests {
         ];
         for (name, input, expected) in cases {
             assert_eq!(neutralize(input), expected, "{name}");
+        }
+    }
+
+    /// 保存済み（`Existing`）の状態にして、履歴の世代を差し込んだアプリ
+    fn history_app(generations: Vec<crate::editor::history::Generation>) -> App {
+        let storage = crate::tui::storage::fake::FakeStorage::default();
+        let mut app =
+            App::with_storage_for_test(Draft::with_format("$model"), Box::new(storage.clone()));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('s'));
+        storage.0.borrow_mut().generations = generations;
+        app
+    }
+
+    fn generation_at(secs: i64, text: &str) -> crate::editor::history::Generation {
+        use chrono::TimeZone;
+        crate::editor::history::Generation {
+            recorded_at: Some(chrono::Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()),
+            text: text.to_string(),
+        }
+    }
+
+    /// 画面に出る日時（ローカル時刻）。実装と同じ変換なので、時差によらず一致する
+    fn shown_time(secs: i64) -> String {
+        use chrono::TimeZone;
+        chrono::Utc
+            .timestamp_opt(1_800_000_000 + secs, 0)
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    #[test]
+    fn test_history_list_shows_times_and_change_counts() {
+        let same = {
+            let app = history_app(vec![]);
+            app.draft.to_toml()
+        };
+        let mut app = history_app(vec![
+            generation_at(20, "format = \"$plan\"\n"),
+            generation_at(10, &same),
+        ]);
+        press(&mut app, KeyCode::Char('H'));
+        let shown = text(&app, 110, 30);
+        for expected in [
+            "履歴 ─ 保存前の世代（新しい順） ─ 2 件",
+            &shown_time(20),
+            &shown_time(10),
+            "（今の下書きと同じ）",
+            "履歴  ↑↓: 選ぶ  Enter: 差分を見て復元",
+        ] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+        // 先頭の世代は、下書きと違う（`+N -M`）。選択の印は先頭
+        let first_row = shown
+            .lines()
+            .find(|line| line.contains(&shown_time(20)))
+            .unwrap();
+        assert!(first_row.contains("> "), "{first_row}");
+        assert!(
+            first_row.contains('+') && first_row.contains('-'),
+            "{first_row}"
+        );
+        assert!(!first_row.contains("同じ"), "{first_row}");
+    }
+
+    #[test]
+    fn test_history_list_explains_when_there_is_nothing() {
+        let mut app = history_app(vec![]);
+        press(&mut app, KeyCode::Char('H'));
+        assert!(text(&app, 110, 30).contains("履歴はまだありません"));
+
+        // まだ保存されていない設定ファイル
+        let mut app = new_app();
+        press(&mut app, KeyCode::Char('H'));
+        let shown = text(&app, 110, 30);
+        assert!(shown.contains("まだ保存されていません"), "{shown}");
+        for (width, height) in [(1, 1), (3, 3), (10, 5), (30, 8)] {
+            let _ = render(&app, width, height);
+        }
+    }
+
+    #[test]
+    fn test_restore_preview_shows_the_generation_and_how_to_restore() {
+        let mut app = history_app(vec![generation_at(5, "format = \"$plan\"\n")]);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        let shown = text(&app, 130, 30);
+        for expected in [
+            &format!("今の下書き → {} の世代", shown_time(5)),
+            "Enter / y: この世代に置き換える（保存はしません）",
+            "復元の確認  Enter / y: この世代に置き換える  Esc: 一覧に戻る",
+        ] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+        // 下書きにだけある行は `-`、世代にだけある行は `+`
+        assert!(shown.contains("+ format = \"$plan\""), "{shown}");
+        for (width, height) in [(1, 1), (3, 3), (10, 5), (30, 8)] {
+            let _ = render(&app, width, height);
         }
     }
 

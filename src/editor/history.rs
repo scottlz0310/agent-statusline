@@ -23,6 +23,54 @@ impl HistoryEntry {
     pub fn read(&self) -> io::Result<String> {
         std::fs::read_to_string(&self.path)
     }
+
+    /// 保存された時刻。ファイル名（`20261017T091234567Z-000000.toml`）から読む。読めなければ `None`
+    pub fn recorded_at(&self) -> Option<DateTime<Utc>> {
+        parse_stamp(self.path.file_stem()?.to_str()?.split('-').next()?)
+    }
+}
+
+/// 履歴の 1 世代（保存前の内容）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generation {
+    pub recorded_at: Option<DateTime<Utc>>,
+    pub text: String,
+}
+
+/// 全世代を、新しい順に、内容つきで読む。読めない世代があれば、パスを添えたエラーにする
+pub fn generations(root: &Path, real: &Path) -> io::Result<Vec<Generation>> {
+    list(root, real)?
+        .into_iter()
+        .map(|entry| {
+            let text = entry.read().map_err(|err| {
+                io::Error::new(err.kind(), format!("{}: {err}", entry.path.display()))
+            })?;
+            Ok(Generation {
+                recorded_at: entry.recorded_at(),
+                text,
+            })
+        })
+        .collect()
+}
+
+/// `20261017T091234567Z`（UTC、ミリ秒まで）を読む
+fn parse_stamp(stamp: &str) -> Option<DateTime<Utc>> {
+    if stamp.len() != 19 || !stamp.is_ascii() || !stamp.ends_with('Z') || &stamp[8..9] != "T" {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| stamp[range].parse::<u32>().ok();
+    let date = chrono::NaiveDate::from_ymd_opt(
+        i32::try_from(number(0..4)?).ok()?,
+        number(4..6)?,
+        number(6..8)?,
+    )?;
+    let time = date.and_hms_milli_opt(
+        number(9..11)?,
+        number(11..13)?,
+        number(13..15)?,
+        number(15..18)?,
+    )?;
+    Some(time.and_utc())
 }
 
 fn dir_for(root: &Path, real: &Path) -> PathBuf {
@@ -118,6 +166,52 @@ mod tests {
 
     fn at(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn test_parse_stamp() {
+        let valid = Utc.with_ymd_and_hms(2027, 1, 15, 8, 0, 0).unwrap()
+            + chrono::Duration::milliseconds(123);
+        // (名前, 入力, 期待する時刻)
+        let cases: [(&str, &str, Option<DateTime<Utc>>); 8] = [
+            ("valid", "20270115T080000123Z", Some(valid)),
+            (
+                "epoch-ms",
+                "19700101T000000001Z",
+                Some(Utc.timestamp_millis_opt(1).unwrap()),
+            ),
+            ("no-z", "20270115T080000123X", None),
+            ("short", "20270115T0800001Z", None),
+            ("no-t", "20270115X080000123Z", None),
+            ("non-digit", "2027011ST080000123Z", None),
+            ("bad-month", "20271315T080000123Z", None),
+            ("empty", "", None),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(parse_stamp(input), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_recorded_at_round_trips_and_generations_read_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = Path::new("/cfg/config.toml");
+        assert_eq!(generations(dir.path(), real).unwrap(), []);
+
+        for i in 0..3 {
+            record(dir.path(), real, format!("v{i}").as_bytes(), at(i), 5).unwrap();
+        }
+        let generations = generations(dir.path(), real).unwrap();
+        let texts: Vec<_> = generations.iter().map(|g| g.text.as_str()).collect();
+        assert_eq!(texts, ["v2", "v1", "v0"], "新しい順");
+        let times: Vec<_> = generations.iter().map(|g| g.recorded_at).collect();
+        assert_eq!(times, [Some(at(2)), Some(at(1)), Some(at(0))]);
+
+        // 読めない世代（UTF-8 でない）は、パスを添えたエラーにする
+        let entry = list(dir.path(), real).unwrap().remove(0);
+        std::fs::write(&entry.path, [0xff, 0xfe]).unwrap();
+        let err = super::generations(dir.path(), real).unwrap_err();
+        assert!(err.to_string().contains(".toml"), "{err}");
     }
 
     #[test]
