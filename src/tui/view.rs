@@ -131,6 +131,9 @@ fn footer_text(app: &App) -> &'static str {
             InputTarget::SavePath => {
                 "別名で保存  Enter: 保存  Esc: 取り消し  ←→ Home End: カーソル  Backspace Delete: 削除"
             }
+            InputTarget::PartsSearch => {
+                "部品を検索  Enter: 確定  Esc: 検索を解除  ←→ Home End: カーソル  Backspace Delete: 削除"
+            }
         };
     }
     if app.picker.is_some() {
@@ -145,7 +148,7 @@ fn footer_text(app: &App) -> &'static str {
             "s: 保存  q: 終了  v: 検証結果  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
         }
         Focus::Parts => {
-            "s: 保存  q: 終了  v: 検証結果  Tab: プレビュー  ↑↓: 部品を選ぶ  Enter: 後ろに追加  i: 前に追加  u: 戻す"
+            "s: 保存  q: 終了  v: 検証結果  Tab: プレビュー  ↑↓: 選ぶ  ←→: カテゴリ  /: 検索  Enter: 後ろに追加  i: 前に追加  u: 戻す"
         }
         Focus::Props => {
             "s: 保存  q: 終了  v: 検証結果  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
@@ -468,6 +471,14 @@ fn status_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(input) = &app.input else {
         return vec![status_line(app)];
     };
+    if input.target == InputTarget::PartsSearch {
+        // 検索語は、入力のたびに一覧を絞り込む。状態行には、入力欄だけを 1 行で出す
+        let label = "部品を検索: ";
+        let room = width.saturating_sub(display_width(label));
+        let mut spans = vec![Span::raw(label)];
+        spans.extend(input_spans(&input.value(), input.cursor(), room));
+        return vec![Line::from(spans)];
+    }
     if input.target != InputTarget::SavePath {
         return vec![status_line(app)];
     }
@@ -747,13 +758,34 @@ fn draw_parts(
     area: Rect,
     columns: usize,
 ) -> Vec<RawOverlay> {
+    let query = app.palette_query();
+    let search = if query.is_empty() {
+        String::new()
+    } else {
+        format!(" ─ 検索: {query}")
+    };
     let block = focus_block(
-        format!(" 部品 ─ {}のサンプル ", app.scenario().label()),
+        format!(
+            " 部品 ─ {}のサンプル ─ {}{search} ",
+            app.scenario().label(),
+            app.palette_category().label()
+        ),
         app.focus == Focus::Parts,
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let items = app.visible_palette();
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "（一致する項目がありません）",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            inner,
+        );
+        return Vec::new();
+    }
     let height = usize::from(inner.height);
     let selected = app.palette_index();
     let offset = (selected + 1).saturating_sub(height);
@@ -763,8 +795,7 @@ fn draw_parts(
 
     let mut rows = Vec::new();
     let mut overlays = Vec::new();
-    for (row, (index, item)) in (0..).zip(app.palette.iter().enumerate().skip(offset).take(height))
-    {
+    for (row, (index, item)) in (0..).zip(items.iter().enumerate().skip(offset).take(height)) {
         let is_selected = index == selected;
         let label = palette::label(*item);
         let padding = " ".repeat(usize::from(LABEL_WIDTH).saturating_sub(display_width(&label)));
@@ -828,6 +859,12 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) {
         app.handle_key(KeyEvent::from(code));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
     }
 
     /// 画面の文字（左上から右下）を行ごとに返す。全角文字の 2 セル目（空）は飛ばす
@@ -1332,6 +1369,68 @@ mod tests {
         let (screen, overlays) = render(&app, 100, 30);
         assert!(screen.join("\n").contains("directory quota"));
         assert!(overlay_text(&overlays[..1]).contains("5h:"));
+    }
+
+    #[test]
+    fn test_parts_list_shows_the_category_and_search_and_only_matching_items() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        let shown = text(&app, 130, 30);
+        assert!(shown.contains("通常のサンプル ─ すべて"), "{shown}");
+        assert!(shown.contains("/: 検索"), "{shown}");
+        assert!(shown.contains("←→: カテゴリ"), "{shown}");
+
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        let (screen, overlays) = render(&app, 130, 30);
+        let shown = screen.join("\n");
+        assert!(shown.contains("通常のサンプル ─ エージェント"), "{shown}");
+        for expected in ["sandbox", "model", "quota"] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+        // ほかのカテゴリの項目は出ない（配置の `directory` を除く）
+        for hidden in ["git_branch", "review", "改行"] {
+            assert!(!shown.contains(hidden), "{hidden}\n{shown}");
+        }
+        // 部品の表示例（生 ANSI）も、見えている項目の分だけ
+        let samples = overlay_text(&overlays[1..]);
+        assert!(samples.contains("5h:"), "{samples}");
+        assert!(
+            !samples.contains("main"),
+            "git_branch の表示例は出ない\n{samples}"
+        );
+
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "QUO");
+        let (screen, _) = render(&app, 130, 30);
+        let shown = screen.join("\n");
+        // 入力中は、枠の題に検索語が出て、状態行に入力欄が出る。一覧は絞り込まれる
+        assert!(shown.contains("エージェント ─ 検索: QUO"), "{shown}");
+        assert!(shown.contains("部品を検索: [QUO"), "{shown}");
+        assert!(shown.contains("検索を解除"), "{shown}");
+        assert!(!shown.contains("sandbox"), "{shown}");
+        press(&mut app, KeyCode::Enter);
+        let shown = text(&app, 130, 30);
+        assert!(shown.contains("エージェント ─ 検索: QUO"), "{shown}");
+        assert!(
+            !shown.contains("部品を検索:"),
+            "確定後は入力欄を閉じる\n{shown}"
+        );
+    }
+
+    #[test]
+    fn test_parts_list_without_a_match_says_so() {
+        let mut app = app_with_focus("$directory", Focus::Parts);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "zzz");
+        let (screen, overlays) = render(&app, 100, 24);
+        let shown = screen.join("\n");
+        assert!(shown.contains("（一致する項目がありません）"), "{shown}");
+        // 表示例は出ず、プレビューだけ。配置には何も仮挿入されない
+        assert_eq!(overlays.len(), 1, "プレビューだけ");
+        // 狭い端末でも壊れない
+        for (width, height) in [(1, 1), (10, 5), (30, 8)] {
+            let _ = render(&app, width, height);
+        }
     }
 
     #[test]
