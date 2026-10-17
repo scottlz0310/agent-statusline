@@ -45,7 +45,7 @@ pub fn pct_style_name<'a>(
 }
 
 /// スタイルのトークン 1 つに対応する ANSI コード。認識できなければ `None`
-fn style_code(token: &str) -> Option<u8> {
+pub fn style_code(token: &str) -> Option<u8> {
     let code = match token.to_ascii_lowercase().as_str() {
         "bold" => 1,
         "dimmed" => 2,

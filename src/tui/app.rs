@@ -13,6 +13,7 @@ use crate::editor::layout::Token;
 use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
 use crate::editor::load::ConfigSource;
 use crate::editor::save::{ConflictKind, SaveError};
+use crate::editor::style_spec::{Decoration, Layer, StyleColor, StyleSpec};
 use crate::editor::update::PropValue;
 use crate::engine::config::Config;
 use crate::engine::parts::{PartSpec, PropKind, find};
@@ -155,6 +156,62 @@ impl Picker {
     }
 }
 
+/// スタイル編集画面の行
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleRow {
+    Color(Layer),
+    Decoration(Decoration),
+}
+
+/// スタイル編集画面の行（上から）。前景・背景の色、各装飾
+pub const STYLE_ROWS: [StyleRow; 7] = [
+    StyleRow::Color(Layer::Foreground),
+    StyleRow::Color(Layer::Background),
+    StyleRow::Decoration(Decoration::Bold),
+    StyleRow::Decoration(Decoration::Dimmed),
+    StyleRow::Decoration(Decoration::Italic),
+    StyleRow::Decoration(Decoration::Underline),
+    StyleRow::Decoration(Decoration::Inverted),
+];
+
+/// スタイル（色・装飾）のトグル選択。`Enter` で決定し、`Esc` で取り消す。選んでいる間も、プレビューに反映する
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleEditor {
+    pub part: &'static str,
+    pub key: &'static str,
+    spec: StyleSpec,
+    /// 開いたときの内容（変えずに決定したときは、値を書き換えない）
+    original: StyleSpec,
+    row: usize,
+}
+
+impl StyleEditor {
+    pub fn spec(&self) -> &StyleSpec {
+        &self.spec
+    }
+
+    pub fn row(&self) -> usize {
+        self.row
+    }
+}
+
+/// 色を巡回する。「なし → 9 色 → なし」の順。端から先は、なしを挟んで反対側へ回る
+fn cycle_color(current: Option<StyleColor>, forward: bool) -> Option<StyleColor> {
+    let count = StyleColor::ALL.len() + 1;
+    let index = current.map_or(0, |color| {
+        1 + StyleColor::ALL
+            .iter()
+            .position(|c| *c == color)
+            .unwrap_or(0)
+    });
+    let next = if forward {
+        (index + 1) % count
+    } else {
+        (index + count - 1) % count
+    };
+    next.checked_sub(1).map(|i| StyleColor::ALL[i])
+}
+
 /// 検証結果（エラー・警告）の一覧の表示。`v` で開く。状態行には先頭の 1 件しか出ないので、全件を見るために使う
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IssuesView {
@@ -286,6 +343,8 @@ pub struct App {
     pub input: Option<TextInput>,
     /// 記号の候補の選択（開いているとき）
     pub picker: Option<Picker>,
+    /// スタイルのトグル選択（開いているとき）
+    pub style_editor: Option<StyleEditor>,
     /// 検証結果の一覧（開いているとき）
     pub issues_view: Option<IssuesView>,
     /// 差分の表示（開いているとき）
@@ -347,6 +406,7 @@ impl App {
             props_from: Focus::Layout,
             input: None,
             picker: None,
+            style_editor: None,
             issues_view: None,
             diff_view: None,
             history_view: None,
@@ -447,9 +507,18 @@ impl App {
         Some(self.draft.preview_prop(picker.part, picker.key, &value))
     }
 
+    /// スタイルを選んでいるとき、その仕様を確定したと仮定した設定。プレビューに使う（下書きは変えない）
+    pub fn style_preview(&self) -> Option<Result<Config, PropError>> {
+        let editor = self.style_editor.as_ref()?;
+        let value = PropValue::Str(editor.spec.text());
+        Some(self.draft.preview_prop(editor.part, editor.key, &value))
+    }
+
     /// 確定前の入力・選択を、確定したと仮定した設定（プレビュー用）。何も入力・選択していなければ `None`
     pub fn live_preview(&self) -> Option<Result<Config, PropError>> {
-        self.picker_preview().or_else(|| self.input_preview())
+        self.picker_preview()
+            .or_else(|| self.style_preview())
+            .or_else(|| self.input_preview())
     }
 
     /// 記号の入力・選択の対象の値（表示幅の案内用）。記号以外を編集しているときは `None`
@@ -530,6 +599,10 @@ impl App {
             self.handle_picker_key(key.code);
             return;
         }
+        if self.style_editor.is_some() {
+            self.handle_style_key(key.code);
+            return;
+        }
         if self.issues_view.is_some() {
             self.handle_issues_key(key.code);
             return;
@@ -603,6 +676,53 @@ impl App {
                 // 受け付けられないときは、開いたままにして、理由を示す
                 match self.draft.set_prop(picker.part, picker.key, &value) {
                     Ok(()) => self.picker = None,
+                    Err(err) => self.message = Some(err.to_string()),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// スタイル編集画面のキー。`↑↓` で行を選び、色の行は `←→`（`Space` で次へ）で巡回、装飾の行は `Space` でオン・オフ
+    /// （`←` オフ、`→` オン）。`Enter` で決定、`Esc` で取り消し、`e` で自由入力（テキスト入力）に切り替える
+    fn handle_style_key(&mut self, key: KeyCode) {
+        let Some(editor) = self.style_editor.as_mut() else {
+            return;
+        };
+        let row = STYLE_ROWS[editor.row];
+        match key {
+            KeyCode::Up => editor.row = editor.row.saturating_sub(1),
+            KeyCode::Down => editor.row = (editor.row + 1).min(STYLE_ROWS.len() - 1),
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => match row {
+                StyleRow::Color(layer) => {
+                    let color = cycle_color(editor.spec.color(layer), key != KeyCode::Left);
+                    editor.spec.set_color(layer, color);
+                }
+                StyleRow::Decoration(decoration) => {
+                    let on = match key {
+                        KeyCode::Left => false,
+                        KeyCode::Right => true,
+                        _ => !editor.spec.has(decoration),
+                    };
+                    editor.spec.set_decoration(decoration, on);
+                }
+            },
+            KeyCode::Esc => self.style_editor = None,
+            KeyCode::Char('e') => {
+                let (part, key, text) = (editor.part, editor.key, editor.spec.text());
+                self.style_editor = None;
+                self.input = Some(TextInput::prop(part, key, &text));
+            }
+            KeyCode::Enter => {
+                // 変えていなければ、値を書き換えない（元の表記を保つ）
+                if editor.spec == editor.original {
+                    self.style_editor = None;
+                    return;
+                }
+                let value = PropValue::Str(editor.spec.text());
+                // 受け付けられないときは、開いたままにして、理由を示す
+                match self.draft.set_prop(editor.part, editor.key, &value) {
+                    Ok(()) => self.style_editor = None,
                     Err(err) => self.message = Some(err.to_string()),
                 }
             }
@@ -1037,6 +1157,18 @@ impl App {
                     key: prop.key,
                     candidates,
                     index,
+                });
+                None
+            }
+            // スタイルは、色と装飾のトグルで選ぶ。自由に入力するには、編集画面で `e`
+            (PropKind::Style, PropValue::Str(value)) if key == KeyCode::Enter => {
+                let spec = StyleSpec::parse(&value);
+                self.style_editor = Some(StyleEditor {
+                    part: part.id,
+                    key: prop.key,
+                    original: spec.clone(),
+                    spec,
+                    row: 0,
                 });
                 None
             }
@@ -1858,6 +1990,7 @@ mod tests {
         let mut app = props_app("git_branch");
         select_prop(&mut app, "style");
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e')); // スタイルは、編集画面から自由入力に切り替える
         for _ in 0..5 {
             press(&mut app, KeyCode::Backspace);
         }
@@ -2817,10 +2950,207 @@ mod tests {
         );
     }
 
+    /// `directory.folder_style`（既定は `bold cyan`）の行にいて、`Enter` でスタイル編集画面を開く
+    fn style_editor_app() -> App {
+        let mut app = props_app("directory");
+        select_prop(&mut app, "folder_style");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.style_editor.is_some());
+        app
+    }
+
+    fn style_text(app: &App) -> String {
+        app.style_editor.as_ref().expect("開いている").spec().text()
+    }
+
+    /// 設定の TOML を読み込んだ状態で、配置のカーソル（先頭の部品）のプロパティ欄にいるアプリ
+    fn props_app_from_toml(toml: &str) -> App {
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let mut app = App::for_test(Draft::new(config, toml.parse().unwrap()));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Props);
+        app
+    }
+
+    #[test]
+    fn test_enter_on_a_style_row_opens_the_toggle_editor_and_e_switches_to_free_text() {
+        let mut app = style_editor_app();
+        let editor = app.style_editor.as_ref().unwrap();
+        assert_eq!((editor.part, editor.key), ("directory", "folder_style"));
+        assert_eq!(editor.row(), 0);
+        assert_eq!(style_text(&app), "bold cyan");
+        assert!(app.input.is_none() && app.picker.is_none());
+
+        press(&mut app, KeyCode::Char('e'));
+        assert!(app.style_editor.is_none());
+        assert_eq!(app.input.as_ref().unwrap().value(), "bold cyan");
+    }
+
+    #[test]
+    fn test_style_editor_cycles_colors_and_toggles_decorations() {
+        let mut app = style_editor_app();
+        // 前景: cyan → white → gray → なし → black → ...（巡回。なしを挟む）
+        for expected in ["bold white", "bold gray", "bold", "bold black"] {
+            press(&mut app, KeyCode::Right);
+            assert_eq!(style_text(&app), expected);
+        }
+        for expected in ["bold", "bold gray", "bold white", "bold cyan"] {
+            press(&mut app, KeyCode::Left);
+            assert_eq!(style_text(&app), expected);
+        }
+        // Space は、色の行では次の色へ
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(style_text(&app), "bold white");
+        press(&mut app, KeyCode::Left);
+
+        // 背景: 行を移して、色を足す。前景の後ろに入る
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(style_text(&app), "bold cyan bg:black");
+        // bold の行: Space でオフ、オン。← でオフ、→ でオン
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(style_text(&app), "cyan bg:black");
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(style_text(&app), "bold cyan bg:black");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(style_text(&app), "cyan bg:black");
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(style_text(&app), "bold cyan bg:black", "オンのまま");
+        // 別の装飾を足すと、色の前に入る
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(style_text(&app), "bold dimmed cyan bg:black");
+
+        // 行の端で止まる
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(
+            app.style_editor.as_ref().unwrap().row(),
+            STYLE_ROWS.len() - 1
+        );
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Up);
+        }
+        assert_eq!(app.style_editor.as_ref().unwrap().row(), 0);
+    }
+
+    #[test]
+    fn test_style_editor_previews_live_and_enter_commits() {
+        let mut app = style_editor_app();
+        press(&mut app, KeyCode::Left); // cyan → magenta
+        press(&mut app, KeyCode::Left); // → blue
+        // 決定前は、プレビューだけが変わり、下書きは変わらない
+        let preview = app
+            .style_preview()
+            .expect("選んでいる間のプレビュー")
+            .unwrap();
+        assert_eq!(preview.directory.folder_style, "bold blue");
+        assert_eq!(
+            app.live_preview().unwrap().unwrap().directory.folder_style,
+            "bold blue"
+        );
+        assert_eq!(
+            app.draft.prop_value("directory", "folder_style"),
+            Some(PropValue::Str("bold cyan".to_string()))
+        );
+        assert!(!app.draft.can_undo());
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.style_editor.is_none());
+        assert_eq!(
+            app.draft.prop_value("directory", "folder_style"),
+            Some(PropValue::Str("bold blue".to_string()))
+        );
+        assert!(app.draft.can_undo(), "ふつうの編集として、元に戻せる");
+        assert!(app.style_preview().is_none());
+    }
+
+    #[test]
+    fn test_style_editor_esc_cancels_and_enter_without_changes_keeps_the_original_text() {
+        let toml = "[directory]\nfolder_style = \"bold   purple\" # 色\n";
+        let mut app = props_app_from_toml(toml);
+        select_prop(&mut app, "folder_style");
+
+        // 変えずに決定: 値も、空白や行末のコメントも、そのまま（履歴にも積まない）
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.style_editor.is_none());
+        assert!(!app.draft.can_undo());
+        assert_eq!(app.draft.to_toml(), toml);
+
+        // 変えて Esc: 取り消し。プレビューも戻る
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Right);
+        assert_ne!(
+            app.style_preview().unwrap().unwrap().directory.folder_style,
+            "bold   purple"
+        );
+        press(&mut app, KeyCode::Esc);
+        assert!(app.style_editor.is_none());
+        assert!(app.style_preview().is_none());
+        assert_eq!(app.draft.to_toml(), toml);
+    }
+
+    #[test]
+    fn test_style_editor_keeps_tokens_it_did_not_touch() {
+        // 別名（purple）、前景色が複数（purple と red）、認識できないトークン（cyna）
+        let toml = "[directory]\nfolder_style = \"cyna bold purple red\"\n";
+        let mut app = props_app_from_toml(toml);
+        select_prop(&mut app, "folder_style");
+        press(&mut app, KeyCode::Enter);
+        // bold の行（3 行目）だけ触る: 前景色の別名・複数・不明なトークンは、そのまま
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(style_text(&app), "cyna purple red");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.draft.prop_value("directory", "folder_style"),
+            Some(PropValue::Str("cyna purple red".to_string()))
+        );
+
+        // 前景の行を触ると、前景色だけが 1 つにまとまる（不明なトークンは残る）
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Right);
+        let text = style_text(&app);
+        assert!(text.starts_with("cyna "), "{text}");
+        assert_eq!(
+            text.matches("purple").count() + text.matches("red").count(),
+            0,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_style_editor_swallows_other_keys() {
+        let mut app = style_editor_app();
+        for key in [
+            KeyCode::Char('q'),
+            KeyCode::Char('s'),
+            KeyCode::Char('u'),
+            KeyCode::Char('v'),
+            KeyCode::Char('t'),
+            KeyCode::Char('H'),
+            KeyCode::Tab,
+        ] {
+            press(&mut app, key);
+            assert!(app.style_editor.is_some());
+            assert!(!app.should_quit);
+            assert_eq!(
+                (app.issues_view.is_some(), app.diff_view.is_some()),
+                (false, false)
+            );
+        }
+        assert_eq!(style_text(&app), "bold cyan", "値は変わらない");
+    }
+
     #[test]
     fn test_non_symbol_rows_still_open_a_text_input_directly() {
         let mut app = props_app("git_branch");
-        select_prop(&mut app, "style");
+        select_prop(&mut app, "format");
         press(&mut app, KeyCode::Enter);
         assert!(app.picker.is_none());
         assert!(app.input.is_some());
@@ -2839,7 +3169,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
 
         // 記号でない行の入力は、対象外
-        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Enter);
         assert!(app.input.is_some());
         assert_eq!(app.symbol_in_progress(), None);

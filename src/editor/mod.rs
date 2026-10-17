@@ -10,5 +10,6 @@ pub mod layout;
 pub mod layout_edit;
 pub mod load;
 pub mod save;
+pub mod style_spec;
 pub mod update;
 pub mod validate;
