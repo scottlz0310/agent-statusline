@@ -1,10 +1,13 @@
 //! 設定 TUI の状態と、キー入力による状態遷移（画面に依存しない）。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 
 use crate::editor::diff::{self, Diff, DiffMode};
 use crate::editor::draft::{Draft, PropError};
@@ -52,6 +55,36 @@ pub enum Focus {
     Layout,
     Parts,
     Props,
+}
+
+/// 画面の領域が、マウスで何を指すか。描画のたびに、`draw` が登録する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    /// 枠の全体（クリックでフォーカスを移す）
+    Pane(Focus),
+    /// 配置のトークン
+    LayoutToken { line: usize, index: usize },
+    /// 部品一覧の項目（絞り込んだ一覧の中の位置）
+    PartsItem(usize),
+    /// プロパティ欄の行
+    PropsRow(usize),
+    /// 記号の候補
+    PickerItem(usize),
+    /// スタイル編集画面の行
+    StyleRow(usize),
+    /// 履歴の世代
+    HistoryItem(usize),
+    /// 検証結果の項目（並べ替えた後の位置）
+    IssueItem(usize),
+    /// 重なり画面の領域（差分など。ホイールでスクロールする）
+    Overlay,
+}
+
+/// マウスの当たり判定の 1 領域
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitArea {
+    pub rect: Rect,
+    pub target: HitTarget,
 }
 
 impl Focus {
@@ -367,6 +400,10 @@ pub struct App {
     width_index: usize,
     pub overflow: Overflow,
     pub should_quit: bool,
+    /// 直近の描画で登録された、マウスの当たり判定（後に登録したものが優先）
+    hits: RefCell<Vec<HitArea>>,
+    /// 配置領域のスクロール位置（先頭の行, 左端の表示列）。描画のたびに、選択中のトークンが見えるよう更新する
+    layout_scroll: Cell<(usize, usize)>,
 }
 
 #[cfg(test)]
@@ -416,6 +453,8 @@ impl App {
             width_index: 0,
             overflow: Overflow::Truncate,
             should_quit: false,
+            hits: RefCell::new(Vec::new()),
+            layout_scroll: Cell::new((0, 0)),
         }
     }
 
@@ -585,6 +624,186 @@ impl App {
             self.props_index = 0;
         }
         self.focus = focus;
+    }
+
+    /// 配置領域の直前のスクロール位置（先頭の行, 左端の表示列）
+    pub fn layout_scroll(&self) -> (usize, usize) {
+        self.layout_scroll.get()
+    }
+
+    pub fn set_layout_scroll(&self, top: usize, left: usize) {
+        self.layout_scroll.set((top, left));
+    }
+
+    /// マウスの当たり判定を空にする（描画の最初に呼ぶ）
+    pub fn reset_hits(&self) {
+        self.hits.borrow_mut().clear();
+    }
+
+    /// 描画した領域を、マウスの当たり判定として登録する。重なるときは、後に登録したものが優先される
+    pub fn add_hit(&self, rect: Rect, target: HitTarget) {
+        if rect.width > 0 && rect.height > 0 {
+            self.hits.borrow_mut().push(HitArea { rect, target });
+        }
+    }
+
+    fn hit_at(&self, column: u16, row: u16) -> Option<HitTarget> {
+        let position = Position::new(column, row);
+        self.hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|hit| hit.rect.contains(position))
+            .map(|hit| hit.target)
+    }
+
+    /// 入力・選択・確認・重なり画面の、いずれかが開いているか。開いている間は、メイン画面へのクリックを受けない
+    fn modal_open(&self) -> bool {
+        self.input.is_some()
+            || self.picker.is_some()
+            || self.style_editor.is_some()
+            || self.issues_view.is_some()
+            || self.diff_view.is_some()
+            || self.history_view.is_some()
+            || self.mode != Mode::Normal
+    }
+
+    /// マウス操作。左クリックは、フォーカスの移動と項目の選択（選択済みの項目をもう一度クリックすると、
+    /// `Enter` 相当の実行）。ホイールは、指している領域の `↑` `↓`。重なり画面が開いている間は、その画面だけが対象
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        let target = self.hit_at(event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(target) = target {
+                    self.message = None;
+                    self.notice = None;
+                    self.click(target);
+                }
+            }
+            MouseEventKind::ScrollUp => self.wheel(target, KeyCode::Up),
+            MouseEventKind::ScrollDown => self.wheel(target, KeyCode::Down),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, target: HitTarget) {
+        match target {
+            // 重なり画面の行: 選んで、選択済みならもう一度クリックで実行する
+            HitTarget::PickerItem(index) => {
+                if let Some(picker) = self.picker.as_mut() {
+                    let again = picker.index == index;
+                    picker.index = index.min(picker.candidates.len().saturating_sub(1));
+                    if again {
+                        self.handle_picker_key(KeyCode::Enter);
+                    }
+                }
+            }
+            HitTarget::StyleRow(row) => {
+                if let Some(editor) = self.style_editor.as_mut() {
+                    let again = editor.row == row;
+                    editor.row = row.min(STYLE_ROWS.len() - 1);
+                    if again {
+                        // 色の行は次の色へ、装飾の行はオン・オフ（`Space` 相当。`Enter` は決定なので使わない）
+                        self.handle_style_key(KeyCode::Char(' '));
+                    }
+                }
+            }
+            HitTarget::HistoryItem(index) => {
+                if let Some(view) = self.history_view.as_mut() {
+                    let again = view.index == index;
+                    view.index = index.min(view.generations.len().saturating_sub(1));
+                    if again {
+                        self.handle_history_key(KeyCode::Enter);
+                    }
+                }
+            }
+            HitTarget::IssueItem(index) => {
+                let last = self.draft.issues().len().saturating_sub(1);
+                if let Some(view) = self.issues_view.as_mut() {
+                    view.index = index.min(last);
+                    view.scroll = 0;
+                }
+            }
+            HitTarget::Overlay => {}
+            // メイン画面: 重なり画面が開いている間は受けない
+            _ if self.modal_open() => {}
+            HitTarget::Pane(focus) => {
+                if self.focus != focus {
+                    self.set_focus(focus);
+                }
+            }
+            HitTarget::LayoutToken { line, index } => {
+                self.set_focus(Focus::Layout);
+                self.draft.edit_layout(|e| e.select_at(line, index));
+            }
+            HitTarget::PartsItem(index) => {
+                let again = self.focus == Focus::Parts && self.palette_index == index;
+                if self.focus != Focus::Parts {
+                    self.set_focus(Focus::Parts);
+                }
+                self.palette_index = index.min(self.visible_palette().len().saturating_sub(1));
+                if again {
+                    self.handle_parts_key(KeyCode::Enter);
+                }
+            }
+            HitTarget::PropsRow(row) => {
+                let again = self.focus == Focus::Props && self.props_index() == row;
+                if self.focus != Focus::Props {
+                    self.set_focus(Focus::Props);
+                }
+                let count = self.target_part().map_or(0, |part| part.props.len());
+                self.props_index = row.min(count.saturating_sub(1));
+                if again {
+                    self.handle_props_key(KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+        }
+    }
+
+    /// ホイール: 指している領域に、`↑`（上）または `↓`（下）を送る。メイン画面では、その領域へフォーカスも移す
+    fn wheel(&mut self, target: Option<HitTarget>, key: KeyCode) {
+        let Some(target) = target else {
+            return;
+        };
+        // 入力中は、ホイールも受けない
+        if self.input.is_some() || self.mode != Mode::Normal {
+            return;
+        }
+        let overlay = matches!(
+            target,
+            HitTarget::PickerItem(_)
+                | HitTarget::StyleRow(_)
+                | HitTarget::HistoryItem(_)
+                | HitTarget::IssueItem(_)
+                | HitTarget::Overlay
+        );
+        if overlay {
+            self.handle_key(KeyEvent::from(key));
+            return;
+        }
+        if self.modal_open() {
+            return;
+        }
+        let focus = match target {
+            HitTarget::Pane(focus) => focus,
+            HitTarget::LayoutToken { .. } => Focus::Layout,
+            HitTarget::PartsItem(_) => Focus::Parts,
+            HitTarget::PropsRow(_) => Focus::Props,
+            _ => return,
+        };
+        // プレビューは、ホイールで動かすものがない。フォーカスも奪わない
+        if focus == Focus::Preview {
+            return;
+        }
+        if self.focus != focus {
+            self.set_focus(focus);
+        }
+        match focus {
+            Focus::Layout => self.handle_layout_key(key, KeyModifiers::NONE),
+            Focus::Parts => self.handle_parts_key(key),
+            Focus::Props => self.handle_props_key(key, KeyModifiers::NONE),
+            Focus::Preview => {}
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -3145,6 +3364,123 @@ mod tests {
             );
         }
         assert_eq!(style_text(&app), "bold cyan", "値は変わらない");
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn left_click(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        ));
+    }
+
+    #[test]
+    fn test_hit_areas_prefer_the_one_registered_last_and_reset_on_redraw() {
+        let mut app = app("$model");
+        app.add_hit(Rect::new(0, 0, 20, 10), HitTarget::Pane(Focus::Preview));
+        app.add_hit(Rect::new(5, 2, 4, 1), HitTarget::PartsItem(3));
+        // 重なる位置は、後に登録した領域（行）が優先される。外れた位置は、枠
+        assert_eq!(app.hit_at(6, 2), Some(HitTarget::PartsItem(3)));
+        assert_eq!(app.hit_at(10, 2), Some(HitTarget::Pane(Focus::Preview)));
+        assert_eq!(app.hit_at(4, 2), Some(HitTarget::Pane(Focus::Preview)));
+        assert_eq!(app.hit_at(20, 2), None, "右端の外");
+        assert_eq!(app.hit_at(5, 10), None, "下端の外");
+        // 大きさのない領域は登録しない
+        app.add_hit(Rect::new(0, 0, 0, 5), HitTarget::Overlay);
+        app.add_hit(Rect::new(0, 0, 5, 0), HitTarget::Overlay);
+        assert_eq!(app.hit_at(0, 0), Some(HitTarget::Pane(Focus::Preview)));
+        // 描画のたびに空になる
+        app.reset_hits();
+        assert_eq!(app.hit_at(6, 2), None);
+
+        // クリックは、領域がなければ何も起こさない
+        let before = app.focus;
+        left_click(&mut app, 6, 2);
+        assert_eq!(app.focus, before);
+    }
+
+    #[test]
+    fn test_clicks_on_the_main_screen_are_ignored_while_a_modal_is_open() {
+        type ModalOpen = fn(&mut App);
+        let mut app = app("$model");
+        app.add_hit(Rect::new(0, 0, 10, 10), HitTarget::Pane(Focus::Props));
+        // 検証結果・差分・履歴・記号の候補・スタイル編集・入力・確認のいずれかが開いている間は、メイン画面を受けない
+        let cases: [(&str, ModalOpen); 7] = [
+            ("issues", |app| {
+                app.issues_view = Some(IssuesView::default());
+            }),
+            ("diff", |app| {
+                app.diff_view = Some(DiffView::new(DiffBase::Saved, String::new(), String::new()));
+            }),
+            ("history", |app| {
+                app.history_view = Some(HistoryView {
+                    generations: Vec::new(),
+                    changes: Vec::new(),
+                    index: 0,
+                    saved_before: true,
+                });
+            }),
+            ("input", |app| {
+                app.input = Some(TextInput::new(InputTarget::PartsSearch, ""));
+            }),
+            ("confirm-quit", |app| {
+                app.mode = Mode::ConfirmQuit;
+            }),
+            ("conflict", |app| {
+                app.mode = Mode::Conflict(ConflictKind::Changed);
+            }),
+            ("style", |app| {
+                app.style_editor = Some(StyleEditor {
+                    part: "model",
+                    key: "style",
+                    spec: StyleSpec::parse("bold"),
+                    original: StyleSpec::parse("bold"),
+                    row: 0,
+                });
+            }),
+        ];
+        for (name, open) in cases {
+            let mut app = app_with_focus("$model", Focus::Layout);
+            app.add_hit(Rect::new(0, 0, 10, 10), HitTarget::Pane(Focus::Props));
+            open(&mut app);
+            left_click(&mut app, 1, 1);
+            assert_eq!(app.focus, Focus::Layout, "{name}");
+        }
+        // 閉じていれば、受ける
+        left_click(&mut app, 1, 1);
+        assert_eq!(app.focus, Focus::Props);
+    }
+
+    #[test]
+    fn test_wheel_over_the_preview_does_not_take_the_focus() {
+        let mut app = app_with_focus("$model", Focus::Layout);
+        app.add_hit(Rect::new(0, 0, 10, 3), HitTarget::Pane(Focus::Preview));
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(app.focus, Focus::Layout);
+        // ホイールの対象のない場所は、何もしない
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 50, 50));
+        assert_eq!(app.focus, Focus::Layout);
+    }
+
+    #[test]
+    fn test_clicking_the_same_props_pane_again_does_not_reset_the_selected_row() {
+        let mut app = props_app("directory");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.props_index(), 2);
+        // 枠の空いている場所をクリックしても、すでにフォーカスがあるので、選択は動かない
+        app.add_hit(Rect::new(0, 0, 10, 10), HitTarget::Pane(Focus::Props));
+        left_click(&mut app, 1, 1);
+        assert_eq!(app.props_index(), 2);
     }
 
     #[test]

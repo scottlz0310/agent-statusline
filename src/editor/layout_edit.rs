@@ -76,6 +76,17 @@ impl LayoutEditor {
             .and_then(|line| line.get(self.cursor.index))
     }
 
+    /// 指定した位置のトークンを選ぶ（マウスのクリック用）。位置が配置の外なら、何もしない。
+    /// 空の行は、`index` が 0 のときだけ選べる
+    pub fn select_at(&mut self, line: usize, index: usize) {
+        let Some(tokens) = self.layout.lines.get(line) else {
+            return;
+        };
+        if index < tokens.len() || (tokens.is_empty() && index == 0) {
+            self.cursor = Cursor { line, index };
+        }
+    }
+
     /// 選択を動かす。左右は行内、上下は行を移る（行内の位置は行の長さに収める）
     pub fn select(&mut self, direction: Direction) {
         let Cursor { line, index } = self.cursor;

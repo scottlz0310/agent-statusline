@@ -39,7 +39,7 @@ fn main() -> io::Result<()> {
             config,
             bench,
         } => cmd_render(agent, config.as_deref(), bench),
-        Commands::Config { config } => tui::run(config.as_deref()),
+        Commands::Config { config, no_mouse } => tui::run(config.as_deref(), !no_mouse),
         Commands::Install {
             agent,
             all,

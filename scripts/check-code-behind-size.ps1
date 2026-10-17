@@ -25,8 +25,8 @@ $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力。
     # 301: 設定 TUI の `mod editor;`、302: `mod preview;`、304: `mod tui;` と `config` サブコマンドのディスパッチ 1 行（ロジックは tui/ に置く）
     "src/main.rs" = 304
-    # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）
-    "src/cli.rs"  = 121
+    # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）、125: `config --no-mouse`（4 行。マウスを使わない手段 #79）
+    "src/cli.rs"  = 125
 }
 
 $violations = New-Object System.Collections.Generic.List[string]
