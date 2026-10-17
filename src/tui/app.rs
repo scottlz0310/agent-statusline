@@ -3,10 +3,12 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::editor::diff::{self, Diff, DiffMode};
 use crate::editor::draft::{Draft, PropError};
+use crate::editor::history::Generation;
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::{Direction, LayoutEditor, Placement};
 use crate::editor::load::ConfigSource;
@@ -185,6 +187,8 @@ pub enum DiffBase {
     Saved,
     /// 競合したときの、ディスク上の今の内容。`exists` が偽なら、外部で削除されている
     Disk { exists: bool },
+    /// 復元の確認。今の下書きから、履歴の世代（保存した日時）へ変わる差分
+    Generation { recorded_at: Option<DateTime<Utc>> },
 }
 
 /// 差分の表示。`t` で保存済みとの差分を、保存の競合のときは `d` でディスク上の内容との差分を開く。
@@ -198,6 +202,8 @@ pub struct DiffView {
     scroll: usize,
     /// 描画が求めた、スクロールできる上限（行数が高さを超える分）
     max_scroll: Cell<usize>,
+    /// 履歴の復元の確認のとき、復元する世代の番号（`Enter` / `y` で復元する）
+    restore: Option<usize>,
 }
 
 impl DiffView {
@@ -209,7 +215,13 @@ impl DiffView {
             mode: DiffMode::Changes,
             scroll: 0,
             max_scroll: Cell::new(0),
+            restore: None,
         }
+    }
+
+    /// 復元の確認か（`Enter` / `y` で復元できる差分か）
+    pub fn is_restore_preview(&self) -> bool {
+        self.restore.is_some()
     }
 
     pub fn diff(&self) -> Diff {
@@ -228,6 +240,24 @@ impl DiffView {
 
 /// 差分で `PageUp` / `PageDown` が動かす行数
 const DIFF_PAGE: usize = 10;
+
+/// 履歴の一覧。`H` で開く。各世代に、今の下書きから、その世代へ変わる行数を添える。
+/// `Enter` で、その世代への差分（復元の確認）を開く
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryView {
+    pub generations: Vec<Generation>,
+    /// 世代ごとの、今の下書きから変わる行数（追加, 削除）
+    pub changes: Vec<(usize, usize)>,
+    index: usize,
+    /// 設定ファイルが保存済みか（履歴がないときの説明に使う）
+    pub saved_before: bool,
+}
+
+impl HistoryView {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+}
 
 /// 画面の下に出す確認・選択の状態。`Normal` 以外のとき、キーはその選択に使われる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +290,10 @@ pub struct App {
     pub issues_view: Option<IssuesView>,
     /// 差分の表示（開いているとき）
     pub diff_view: Option<DiffView>,
+    /// 履歴の一覧（開いているとき）
+    pub history_view: Option<HistoryView>,
+    /// 履歴の世代を復元する直前の下書き（TOML）。復元の直後に `u` で戻すために 1 件だけ持つ
+    pre_restore: Option<String>,
     /// 直前の操作が受け付けられなかった理由（次のキー入力で消える）
     pub message: Option<String>,
     /// 直前の操作の結果の知らせ（保存した、など。次のキー入力で消える）
@@ -315,6 +349,8 @@ impl App {
             picker: None,
             issues_view: None,
             diff_view: None,
+            history_view: None,
+            pre_restore: None,
             message: None,
             scenario_index: 0,
             width_index: 0,
@@ -502,6 +538,10 @@ impl App {
             self.handle_diff_key(key.code);
             return;
         }
+        if self.history_view.is_some() {
+            self.handle_history_key(key.code);
+            return;
+        }
         if self.mode != Mode::Normal {
             self.handle_mode_key(key.code);
             return;
@@ -525,7 +565,8 @@ impl App {
             }
             KeyCode::Tab => self.set_focus(self.focus.next()),
             KeyCode::BackTab => self.set_focus(self.focus.previous()),
-            KeyCode::Char('u') => self.draft.undo(),
+            KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('H') => self.open_history(),
             KeyCode::Char('v') => self.issues_view = Some(IssuesView::default()),
             KeyCode::Char('t') => {
                 self.diff_view = Some(DiffView::new(
@@ -607,9 +648,118 @@ impl App {
                 view.mode = view.mode.toggled();
                 view.scroll = 0;
             }
+            KeyCode::Enter | KeyCode::Char('y') if view.restore.is_some() => self.restore(),
             KeyCode::Esc | KeyCode::Char('t' | 'd') => self.diff_view = None,
             _ => {}
         }
+    }
+
+    /// 元に戻す。履歴の世代を復元した直後（その後の編集がまだない）なら、復元前の下書きに戻す。
+    /// それ以外は、配置・プロパティの編集を 1 件ずつ戻す
+    fn undo(&mut self) {
+        if !self.draft.can_undo()
+            && let Some(previous) = self.pre_restore.take()
+        {
+            match Draft::from_text(&previous) {
+                Ok(draft) => {
+                    self.draft = draft;
+                    self.notice =
+                        Some("復元を取り消しました（復元前の下書きに戻しました）".to_string());
+                }
+                Err(err) => {
+                    self.message = Some(format!("復元前の下書きに戻せません: {err}"));
+                    self.pre_restore = Some(previous);
+                }
+            }
+            return;
+        }
+        self.draft.undo();
+    }
+
+    /// 履歴の一覧を開く。各世代に、今の下書きから変わる行数を添える。読めないときは、理由を示す
+    fn open_history(&mut self) {
+        match self.storage.history(&self.source) {
+            Ok(generations) => {
+                let current = self.draft.to_toml();
+                let changes = generations
+                    .iter()
+                    .map(|generation| {
+                        let diff = diff::diff(&current, &generation.text, DiffMode::Changes);
+                        (diff.added, diff.removed)
+                    })
+                    .collect();
+                self.history_view = Some(HistoryView {
+                    generations,
+                    changes,
+                    index: 0,
+                    saved_before: matches!(self.source, ConfigSource::Existing { .. }),
+                });
+            }
+            Err(err) => self.message = Some(format!("履歴を読めません: {err}")),
+        }
+    }
+
+    /// 履歴の一覧のキー。`↑↓` で選び、`Enter` で復元の確認（差分）を開き、`Esc` / `H` で閉じる
+    fn handle_history_key(&mut self, key: KeyCode) {
+        let current = self.draft.to_toml();
+        let Some(view) = self.history_view.as_mut() else {
+            return;
+        };
+        let last = view.generations.len().saturating_sub(1);
+        match key {
+            KeyCode::Up => view.index = view.index.saturating_sub(1),
+            KeyCode::Down => view.index = (view.index + 1).min(last),
+            KeyCode::Enter => {
+                if let Some(generation) = view.generations.get(view.index) {
+                    let mut diff_view = DiffView::new(
+                        DiffBase::Generation {
+                            recorded_at: generation.recorded_at,
+                        },
+                        current,
+                        generation.text.clone(),
+                    );
+                    diff_view.restore = Some(view.index);
+                    self.diff_view = Some(diff_view);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('H') => self.history_view = None,
+            _ => {}
+        }
+    }
+
+    /// 復元の確認の差分で選んだ世代を、下書きに復元する。保存はしない（`s`）。
+    /// 世代が読めない内容のときは、理由を示して、差分を開いたままにする
+    fn restore(&mut self) {
+        let Some(index) = self.diff_view.as_ref().and_then(|view| view.restore) else {
+            return;
+        };
+        let Some(generation) = self
+            .history_view
+            .as_ref()
+            .and_then(|view| view.generations.get(index))
+        else {
+            return;
+        };
+        let restored = match Draft::from_text(&generation.text) {
+            Ok(draft) => draft,
+            Err(err) => {
+                self.message = Some(format!("この世代は復元できません: {err}"));
+                return;
+            }
+        };
+        let before = self.draft.to_toml();
+        self.diff_view = None;
+        self.history_view = None;
+        if restored.to_toml() == before {
+            self.notice = Some("今の下書きと同じなので、復元しませんでした".to_string());
+            return;
+        }
+        self.pre_restore = Some(before);
+        self.draft = restored;
+        self.notice = Some(
+            "世代を下書きに復元しました（まだ保存していません: s で保存、u で復元前に戻す）"
+                .to_string(),
+        );
     }
 
     /// 保存の競合のとき、ディスク上の今の内容と下書きの差分を開く。
@@ -727,6 +877,8 @@ impl App {
                 self.draft = Draft::new(loaded.config, loaded.document);
                 self.source = loaded.source;
                 self.saved_toml = self.draft.to_toml();
+                // 読み込み直した下書きに、復元前の下書きへ戻す道は残さない
+                self.pre_restore = None;
                 self.notice =
                     Some("再読み込みしました（それまでの編集は破棄しました）".to_string());
             }
@@ -997,6 +1149,7 @@ fn cycle_choice(
 mod tests {
     use super::*;
     use crate::editor::diff::LineKind;
+    use crate::editor::history::Generation;
     use crate::editor::layout_edit::Cursor;
 
     fn app(format: &str) -> App {
@@ -2166,6 +2319,232 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("permission denied"), "{message}");
+    }
+
+    fn generation(secs: i64, format: &str) -> Generation {
+        use chrono::TimeZone;
+        Generation {
+            recorded_at: Some(chrono::Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()),
+            text: format!("format = \"{format}\"\n"),
+        }
+    }
+
+    /// 保存済み（`Existing`）の状態にして、履歴の世代を差し込む
+    fn app_with_history(format: &str, generations: Vec<Generation>) -> (App, FakeStorage) {
+        let (mut app, storage) = app_with_storage(format);
+        make_dirty(&mut app);
+        press(&mut app, KeyCode::Char('s'));
+        assert!(!app.is_dirty());
+        storage.0.borrow_mut().generations = generations;
+        (app, storage)
+    }
+
+    #[test]
+    fn test_h_opens_the_history_with_change_counts_and_closes_it() {
+        let (mut app, _storage) = app_with_history(
+            "$model",
+            vec![generation(2, "$plan"), generation(1, "$model")],
+        );
+        press(&mut app, KeyCode::Char('H'));
+        let view = app.history_view.as_ref().expect("開く");
+        assert_eq!(view.generations.len(), 2);
+        assert!(view.saved_before);
+        // 今の下書きから各世代へ変わる行数。`$model` の世代は、今の下書きと `format` の書き方だけが違う
+        assert!(
+            view.changes[0].0 + view.changes[0].1 > 0,
+            "{:?}",
+            view.changes
+        );
+        assert_eq!(view.index(), 0);
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.history_view.as_ref().unwrap().index(),
+            1,
+            "末尾で止まる"
+        );
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.history_view.as_ref().unwrap().index(), 0);
+
+        // 開いている間は、`q` `s` `u` が効かない
+        for key in [KeyCode::Char('q'), KeyCode::Char('s'), KeyCode::Char('u')] {
+            press(&mut app, key);
+            assert!(!app.should_quit);
+            assert!(app.history_view.is_some());
+        }
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.history_view, None);
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Char('H'));
+        assert_eq!(app.history_view, None, "H でも閉じる");
+    }
+
+    #[test]
+    fn test_h_without_history_or_with_unreadable_history() {
+        // まだ保存されていない設定ファイル: 履歴はない（説明が変わる）
+        let (mut app, _storage) = app_with_storage("$model");
+        press(&mut app, KeyCode::Char('H'));
+        let view = app.history_view.as_ref().expect("開く");
+        assert_eq!(view.generations, Vec::new());
+        assert!(!view.saved_before);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.diff_view, None, "世代がなければ、差分は開かない");
+        press(&mut app, KeyCode::Esc);
+
+        // 履歴を読めない: 理由を示して、開かない
+        let (mut app, storage) = app_with_history("$model", vec![generation(1, "$plan")]);
+        storage.0.borrow_mut().history_error = Some("permission denied".to_string());
+        press(&mut app, KeyCode::Char('H'));
+        assert_eq!(app.history_view, None);
+        let message = app.message.clone().expect("理由が示される");
+        assert!(message.contains("履歴を読めません"), "{message}");
+        assert!(message.contains("permission denied"), "{message}");
+    }
+
+    #[test]
+    fn test_history_enter_shows_the_diff_to_that_generation_and_esc_returns_to_the_list() {
+        let (mut app, _storage) = app_with_history(
+            "$model",
+            vec![generation(2, "$plan"), generation(1, "$quota")],
+        );
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        let view = app.diff_view.as_ref().expect("復元の確認の差分");
+        assert!(view.is_restore_preview());
+        let DiffBase::Generation { recorded_at } = view.base else {
+            panic!("世代との差分: {:?}", view.base);
+        };
+        assert_eq!(
+            recorded_at,
+            app.history_view.as_ref().unwrap().generations[1].recorded_at
+        );
+        // 今の下書きから、その世代へ: 世代にだけある行が `+`
+        let lines = diff_lines(&app);
+        assert!(
+            lines
+                .iter()
+                .any(|(kind, text)| *kind == LineKind::Added && text.contains("quota")),
+            "{lines:?}"
+        );
+        // 差分を閉じても、復元はされない。一覧に戻る
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.diff_view, None);
+        assert!(app.history_view.is_some());
+        assert_eq!(format(&app), "$model\n");
+    }
+
+    #[test]
+    fn test_restore_replaces_the_draft_and_u_undoes_it_right_after() {
+        let (mut app, _storage) = app_with_history("$model", vec![generation(1, "$plan")]);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter); // 差分の画面で復元
+        assert_eq!(app.diff_view, None);
+        assert_eq!(app.history_view, None);
+        assert_eq!(format(&app), "$plan", "世代の内容になる");
+        assert!(app.is_dirty(), "保存はしない");
+        assert!(app.notice.clone().unwrap().contains("復元しました"));
+
+        // 復元の直後なら、`u` で復元前の下書きに戻る
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$model\n");
+        assert!(app.notice.clone().unwrap().contains("復元を取り消しました"));
+        // 戻した後の `u` は、もう何もしない（履歴がない）
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$model\n");
+    }
+
+    #[test]
+    fn test_u_after_edits_following_a_restore_undoes_the_edits_first() {
+        let (mut app, _storage) = app_with_history("$model", vec![generation(1, "$plan")]);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('y')); // y でも復元できる
+        assert_eq!(format(&app), "$plan");
+
+        // 復元の後の編集は、これまでどおり 1 件ずつ戻せる。戻し終えると、復元自体を取り消せる
+        press(&mut app, KeyCode::Char('a'));
+        assert!(app.draft.can_undo());
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$plan", "まず、復元後の編集");
+        assert!(!app.draft.can_undo());
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$model\n", "次に、復元そのもの");
+    }
+
+    #[test]
+    fn test_restore_of_an_identical_generation_does_nothing() {
+        let (mut app, _storage) = app_with_history("$model", vec![]);
+        let same = Generation {
+            recorded_at: None,
+            text: app.draft.to_toml(),
+        };
+        _storage.0.borrow_mut().generations = vec![same];
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.diff_view, None);
+        assert!(app.notice.clone().unwrap().contains("同じなので"));
+        // 復元していないので、`u` は復元の取り消しではなく、ふつうの元に戻す（直前の配置の編集を戻す）
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$model");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_none_or(|notice| !notice.contains("復元を取り消し"))
+        );
+    }
+
+    #[test]
+    fn test_restore_of_an_unreadable_generation_is_refused_and_keeps_the_diff_open() {
+        let broken = Generation {
+            recorded_at: None,
+            text: "format = \n".to_string(),
+        };
+        let (mut app, _storage) = app_with_history("$model", vec![broken]);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        let message = app.message.clone().expect("理由が示される");
+        assert!(message.contains("この世代は復元できません"), "{message}");
+        assert!(app.diff_view.is_some(), "差分は開いたまま");
+        assert!(app.history_view.is_some());
+        assert_eq!(format(&app), "$model\n", "下書きは変わらない");
+    }
+
+    #[test]
+    fn test_reload_forgets_the_pre_restore_draft() {
+        let (mut app, storage) = app_with_history("$model", vec![generation(1, "$plan")]);
+        press(&mut app, KeyCode::Char('H'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(format(&app), "$plan");
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = Some(SaveError::Conflict(ConflictKind::Changed));
+            state.reload_to = Some(loaded("format = \"$quota\"\n"));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(format(&app), "$quota");
+        // 読み込み直した下書きに、復元前の下書きへ戻る道は残らない
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(format(&app), "$quota");
+    }
+
+    #[test]
+    fn test_h_is_a_character_while_typing() {
+        let mut app = props_app("model");
+        select_prop(&mut app, "symbol");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('H'));
+        assert_eq!(app.history_view, None);
+        assert!(app.input.as_ref().unwrap().value().ends_with('H'));
     }
 
     #[test]

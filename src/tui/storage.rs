@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::editor::history::{self, Generation};
 use crate::editor::load::{ConfigEnv, ConfigError, ConfigSource, LoadedConfig, load_config_strict};
 use crate::editor::save::{SaveEnv, SaveError, save};
 
@@ -21,6 +22,9 @@ pub trait Storage {
 
     /// `path` の、ディスク上の今の内容。ファイルが無ければ `None`（外部での削除の確認に使う）
     fn read(&self, path: &Path) -> io::Result<Option<String>>;
+
+    /// 保存前の内容の履歴を、新しい順に返す。まだ作られていない設定ファイルは、履歴がないので空
+    fn history(&self, source: &ConfigSource) -> io::Result<Vec<Generation>>;
 }
 
 /// 実際のファイルシステムへ保存する
@@ -62,6 +66,18 @@ impl Storage for FileStorage {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    fn history(&self, source: &ConfigSource) -> io::Result<Vec<Generation>> {
+        let ConfigSource::Existing { path, .. } = source else {
+            return Ok(Vec::new());
+        };
+        let root = self
+            .save_env
+            .history_root
+            .as_deref()
+            .ok_or_else(|| io::Error::other("履歴の保存先を決められません"))?;
+        history::generations(root, &path.real)
     }
 }
 
@@ -149,6 +165,52 @@ mod tests {
     }
 
     #[test]
+    fn test_history_returns_previous_contents_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        let path = dir.path().join("c.toml");
+        std::fs::write(&path, "format = \"$plan\"\n").unwrap();
+        let loaded = storage.reload(&path).unwrap();
+        assert_eq!(
+            storage.history(&loaded.source).unwrap(),
+            Vec::new(),
+            "まだ保存していない"
+        );
+
+        // 保存のたびに、保存前の内容が 1 世代残る（新しい順）
+        let source = storage.save(&loaded.source, TEXT).unwrap();
+        storage
+            .save(&source, "format = \"$model $plan\"\n")
+            .unwrap();
+        let texts: Vec<_> = storage
+            .history(&source)
+            .unwrap()
+            .into_iter()
+            .map(|generation| generation.text)
+            .collect();
+        assert_eq!(texts, [TEXT, "format = \"$plan\"\n"]);
+
+        // 未作成の設定ファイルには、履歴がない
+        let missing = ConfigSource::Missing {
+            target: dir.path().join("none.toml"),
+            from_link: false,
+        };
+        assert_eq!(storage.history(&missing).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn test_history_without_a_history_dir_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = storage(dir.path());
+        storage.save_env.history_root = None;
+        let path = dir.path().join("c.toml");
+        std::fs::write(&path, TEXT).unwrap();
+        let loaded = storage.reload(&path).unwrap();
+        let err = storage.history(&loaded.source).unwrap_err();
+        assert!(err.to_string().contains("履歴の保存先"), "{err}");
+    }
+
+    #[test]
     fn test_reload_reads_exactly_the_given_path() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.toml");
@@ -204,6 +266,10 @@ pub mod fake {
         pub read_error: Option<String>,
         /// `read` で渡されたパス
         pub reads: Vec<PathBuf>,
+        /// `history` が返す世代（新しい順）
+        pub generations: Vec<Generation>,
+        /// `history` を失敗させる（`Some` の間、毎回）
+        pub history_error: Option<String>,
     }
 
     /// 状態を共有するので、`App` に渡した後も、テストから呼び出しを確認できる
@@ -256,6 +322,18 @@ pub mod fake {
                 Some(message) => Err(io::Error::other(message.clone())),
                 None => Ok(state.disk.clone()),
             }
+        }
+
+        fn history(&self, source: &ConfigSource) -> io::Result<Vec<Generation>> {
+            let state = self.0.borrow();
+            if let Some(message) = &state.history_error {
+                return Err(io::Error::other(message.clone()));
+            }
+            // まだ作られていない設定ファイルには、履歴がない（実装と同じ）
+            Ok(match source {
+                ConfigSource::Existing { .. } => state.generations.clone(),
+                ConfigSource::Missing { .. } => Vec::new(),
+            })
         }
     }
 }

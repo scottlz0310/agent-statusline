@@ -89,6 +89,25 @@ impl Draft {
         &self.layout
     }
 
+    /// TOML の文字列から作る（履歴の世代の復元など）。構文エラーや、設定として読めない内容は、理由つきのエラーにする。
+    /// 意味的なエラー（閾値の大小など）が残っていても作れる（`new` と同じ。保存のときに止まる）
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        let report = validate(text);
+        let Some(config) = report.config else {
+            let reason = report
+                .issues
+                .iter()
+                .find(|issue| issue.severity == Severity::Error)
+                .map_or_else(|| "設定として読めません".to_string(), |i| i.message.clone());
+            return Err(reason);
+        };
+        // `validate` が構文を確認済み
+        let document: DocumentMut = text
+            .parse()
+            .map_err(|e: toml_edit::TomlError| format!("TOML の構文エラー: {}", e.message()))?;
+        Ok(Self::new(config, document))
+    }
+
     /// テスト用: `format` だけを指定した下書き（ほかは既定）
     #[cfg(test)]
     pub fn with_format(format: &str) -> Self {
@@ -268,6 +287,27 @@ mod tests {
 
     fn int(value: i64) -> PropValue {
         PropValue::Int(value)
+    }
+
+    #[test]
+    fn test_from_text() {
+        // 読める内容: コメント・未知のキーも保たれる。意味的なエラーが残っていても作れる
+        let text =
+            "# メモ\nunknown_key = 1\n[context]\nthreshold_warning = 90\nthreshold_critical = 80\n";
+        let draft = Draft::from_text(text).unwrap();
+        assert_eq!(draft.to_toml(), text);
+        assert!(draft.has_errors(), "閾値の大小のエラーは残る");
+
+        // 読めない内容は、理由つきのエラー
+        // (名前, 入力, 理由に含まれる語)
+        let cases = [
+            ("syntax", "format = \n", "構文"),
+            ("type", "format = 3\n", "読めません"),
+        ];
+        for (name, input, fragment) in cases {
+            let err = Draft::from_text(input).unwrap_err();
+            assert!(err.contains(fragment), "{name}: {err}");
+        }
     }
 
     fn string(value: &str) -> PropValue {
