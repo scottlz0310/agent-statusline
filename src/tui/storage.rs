@@ -1,6 +1,8 @@
 //! 設定ファイルの保存と再読み込み。画面の状態遷移（`app`）が、ファイルシステムに直接触れないよう、
 //! トレイトの背後に置く（テストで差し替えられる）。
 
+use std::fs;
+use std::io;
 use std::path::Path;
 
 use crate::editor::load::{ConfigEnv, ConfigError, ConfigSource, LoadedConfig, load_config_strict};
@@ -16,6 +18,9 @@ pub trait Storage {
     /// 設定を読み込み直す。`path` は、今の編集対象のパス（未作成のときは、保存先）。
     /// 起動時の指定や標準の探索へは戻らない（別名で保存した後も、そのファイルを読む）
     fn reload(&self, path: &Path) -> Result<LoadedConfig, ConfigError>;
+
+    /// `path` の、ディスク上の今の内容。ファイルが無ければ `None`（外部での削除の確認に使う）
+    fn read(&self, path: &Path) -> io::Result<Option<String>>;
 }
 
 /// 実際のファイルシステムへ保存する
@@ -49,6 +54,14 @@ impl Storage for FileStorage {
 
     fn reload(&self, path: &Path) -> Result<LoadedConfig, ConfigError> {
         load_config_strict(Some(path), &self.config_env)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Option<String>> {
+        match fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -112,6 +125,30 @@ mod tests {
     }
 
     #[test]
+    fn test_read_returns_the_current_disk_content_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        let path = dir.path().join("c.toml");
+
+        assert_eq!(storage.read(&path).unwrap(), None, "ファイルが無い");
+        std::fs::write(&path, TEXT).unwrap();
+        assert_eq!(storage.read(&path).unwrap().as_deref(), Some(TEXT));
+        std::fs::write(&path, "format = \"$plan\"\n").unwrap();
+        assert_eq!(
+            storage.read(&path).unwrap().as_deref(),
+            Some("format = \"$plan\"\n"),
+            "キャッシュせず、今の内容を読む"
+        );
+
+        // 読めない内容（UTF-8 でない）は、無いことにせず、エラーで伝える
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let err = storage.read(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // ディレクトリも同じ（NotFound ではない）
+        assert!(storage.read(dir.path()).is_err());
+    }
+
+    #[test]
     fn test_reload_reads_exactly_the_given_path() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.toml");
@@ -161,6 +198,12 @@ pub mod fake {
         pub save_as_error: Option<SaveError>,
         /// 次の `reload` が返す設定（なければ、読み込みエラー）
         pub reload_to: Option<LoadedConfig>,
+        /// `read` が返す、ディスク上の内容（`None` は、ファイルが無い）
+        pub disk: Option<String>,
+        /// `read` を失敗させる（`Some` の間、毎回）
+        pub read_error: Option<String>,
+        /// `read` で渡されたパス
+        pub reads: Vec<PathBuf>,
     }
 
     /// 状態を共有するので、`App` に渡した後も、テストから呼び出しを確認できる
@@ -204,6 +247,15 @@ pub mod fake {
             let mut state = self.0.borrow_mut();
             state.reloads.push(path.to_path_buf());
             state.reload_to.take().ok_or(ConfigError::NoConfigDir)
+        }
+
+        fn read(&self, path: &Path) -> io::Result<Option<String>> {
+            let mut state = self.0.borrow_mut();
+            state.reads.push(path.to_path_buf());
+            match &state.read_error {
+                Some(message) => Err(io::Error::other(message.clone())),
+                None => Ok(state.disk.clone()),
+            }
         }
     }
 }

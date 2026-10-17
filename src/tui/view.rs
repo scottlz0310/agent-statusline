@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+use crate::editor::diff::{DiffMode, LineKind};
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::LayoutEditor;
 use crate::editor::save::ConflictKind;
@@ -15,7 +16,7 @@ use crate::engine::config::Config;
 use crate::engine::parts::PropKind;
 use crate::preview::width::{Overflow, display_width, fit_line, symbol_notes};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
-use crate::tui::app::{App, Focus, InputTarget, Mode, WidthChoice};
+use crate::tui::app::{App, DiffBase, Focus, InputTarget, Mode, WidthChoice};
 use crate::tui::palette::{self, PaletteItem};
 
 /// プレビューの最大の表示行数。それ以上は、切り詰めて表示する
@@ -101,7 +102,10 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
     );
 
     let mut overlays = vec![draw_preview(frame, app, preview, &lines, columns, too_wide)];
-    if app.issues_view.is_some() {
+    if app.diff_view.is_some() {
+        // 差分も、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
+        draw_diff(frame, app, middle);
+    } else if app.issues_view.is_some() {
         // 検証結果の一覧は、配置と部品一覧の場所いっぱいに出す（部品の表示例の生 ANSI も出さない）
         draw_issues(frame, app, middle);
     } else {
@@ -142,19 +146,22 @@ fn footer_text(app: &App) -> &'static str {
     if app.issues_view.is_some() {
         return "検証結果  ↑↓: 選ぶ（長い項目は 1 行ずつスクロール）  Esc / v: 閉じる";
     }
+    if app.diff_view.is_some() {
+        return "差分  ↑↓ PageUp PageDown Home End: スクロール  f: 変更箇所/全文  Esc / t / d: 閉じる";
+    }
     // 保存と終了は、端末が狭くて切れても見えるよう、先頭に置く
     match app.focus {
         Focus::Layout => {
-            "s: 保存  q: 終了  v: 検証結果  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: プロパティ  ↑↓←→: 選択  Shift+矢印: 移動  d: 削除  n: 改行  a: 行追加  u: 戻す"
         }
         Focus::Parts => {
-            "s: 保存  q: 終了  v: 検証結果  Tab: プレビュー  ↑↓: 選ぶ  ←→: カテゴリ  /: 検索  Enter: 後ろに追加  i: 前に追加  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: プレビュー  ←→: カテゴリ  /: 検索  Enter: 後ろに追加  i: 前に追加  u: 戻す"
         }
         Focus::Props => {
-            "s: 保存  q: 終了  v: 検証結果  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: 部品一覧  ↑↓: 行  Enter/Space: 切替・入力  ←→: 増減・選択（Shift: ±10）  u: 戻す"
         }
         Focus::Preview => {
-            "s: 保存  q: 終了  v: 検証結果  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
+            "s: 保存  q: 終了  t: 差分  v: 検証  Tab: 配置  ←/→: シナリオ  w: 幅  o: 折返/切詰  u: 戻す"
         }
     }
 }
@@ -521,12 +528,14 @@ fn status_line(app: &App) -> Line<'static> {
                 ConflictKind::Deleted => "設定ファイルが外部で削除されました",
                 ConflictKind::Created => "設定ファイルが他で作成されました",
             };
-            return text(
-                format!(
-                    "{reason}。 r: 再読み込み（今の編集を破棄）  a: 別名で保存  その他のキー: 戻る"
-                ),
-                red,
+            let choices = format!(
+                "{reason}。 d: 差分を見る  r: 再読み込み（今の編集を破棄）  a: 別名で保存  その他のキー: 戻る"
             );
+            // 差分を開けなかったときは、理由を添えて、選択は残す
+            return match &app.message {
+                Some(message) => text(format!("受け付けられません: {message} — {choices}"), red),
+                None => text(choices, red),
+            };
         }
         Mode::Normal => {}
     }
@@ -580,6 +589,96 @@ fn status_line(app: &App) -> Line<'static> {
     )
 }
 
+/// 設定ファイル由来の文字列を画面に出すための無害化。タブは空白に、そのほかの制御文字は `U+FFFD` にする
+/// （端末の制御列を、画面へ通さない）
+fn neutralize(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| match c {
+            '\t' => vec![' '; 4],
+            c if c.is_control() => vec!['\u{FFFD}'],
+            c => vec![c],
+        })
+        .collect()
+}
+
+/// 差分の題に出す、比べる元の説明
+fn diff_base_label(base: DiffBase) -> &'static str {
+    match base {
+        DiffBase::Saved => "保存済み → 下書き",
+        DiffBase::Disk { exists: true } => "ディスク上の今の内容 → 下書き",
+        DiffBase::Disk { exists: false } => "（ディスクに無い）→ 下書き",
+    }
+}
+
+/// 差分の表示。比べる元（保存済み / ディスク上の今の内容）と下書きの差を、配置と部品一覧の場所いっぱいに出す。
+/// `+`（緑）は下書きにある行、`-`（赤）は比べる元にだけある行。行数が高さを超えるときはスクロールする
+fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = &app.diff_view else {
+        return;
+    };
+    let diff = view.diff();
+    let mode = match view.mode {
+        DiffMode::Changes => "変更箇所",
+        DiffMode::Full => "全文",
+    };
+    let block = focus_block(
+        format!(
+            " 差分 ─ {} ─ +{} -{} ─ {mode} ",
+            diff_base_label(view.base),
+            diff.added,
+            diff.removed
+        ),
+        true,
+    );
+    let inner = block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(block, area);
+        return;
+    }
+    if diff.lines.is_empty() {
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new("変更はありません（f: 全文を表示）"), inner);
+        return;
+    }
+
+    let width = usize::from(inner.width);
+    let mut rows: Vec<Line> = Vec::new();
+    for line in &diff.lines {
+        let (sign, style) = match line.kind {
+            LineKind::Added => ("+ ", Style::default().fg(Color::Green)),
+            LineKind::Removed => ("- ", Style::default().fg(Color::Red)),
+            LineKind::Hunk => ("", Style::default().fg(Color::Cyan)),
+            LineKind::Context => ("  ", Style::default().add_modifier(Modifier::DIM)),
+        };
+        let text_width = width.saturating_sub(display_width(sign));
+        for (row, part) in fit_line(&neutralize(&line.text), text_width, Overflow::Wrap)
+            .into_iter()
+            .enumerate()
+        {
+            // 折り返した 2 行目以降は、印の分だけ空けて、続きだと分かるようにする
+            let prefix = if row == 0 {
+                sign.to_string()
+            } else {
+                " ".repeat(display_width(sign))
+            };
+            rows.push(Line::from(Span::styled(format!("{prefix}{part}"), style)));
+        }
+    }
+
+    let height = usize::from(inner.height);
+    let max_scroll = rows.len().saturating_sub(height);
+    view.set_max_scroll(max_scroll);
+    let scroll = view.scroll().min(max_scroll);
+    let block = if scroll < max_scroll {
+        block.title_bottom(" ↓ 続きがあります ")
+    } else {
+        block
+    };
+    frame.render_widget(block, area);
+    let visible: Vec<Line> = rows.into_iter().skip(scroll).take(height).collect();
+    frame.render_widget(Paragraph::new(visible), inner);
+}
+
 /// 検証結果の一覧の、行頭の印（`▶ ` など）の表示幅
 const ISSUE_MARKER_WIDTH: usize = 2;
 
@@ -627,10 +726,7 @@ fn draw_issues(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("{}: ", issue.path)
         };
-        let message: String = format!("{label} {location}{}", issue.message)
-            .chars()
-            .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-            .collect();
+        let message = neutralize(&format!("{label} {location}{}", issue.message));
         let start = lines.len();
         let mut style = Style::default().fg(color);
         if index == selected {
@@ -1369,6 +1465,154 @@ mod tests {
         let (screen, overlays) = render(&app, 100, 30);
         assert!(screen.join("\n").contains("directory quota"));
         assert!(overlay_text(&overlays[..1]).contains("5h:"));
+    }
+
+    #[test]
+    fn test_neutralize() {
+        // (名前, 入力, 期待する出力)
+        let cases = [
+            ("plain", "format = \"$model\"", "format = \"$model\""),
+            ("tab", "a\tb", "a    b"),
+            ("escape", "x\u{1b}[31my", "x\u{FFFD}[31my"),
+            ("bell-and-null", "\u{7}\u{0}", "\u{FFFD}\u{FFFD}"),
+            ("japanese", "# 設定", "# 設定"),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(neutralize(input), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_diff_view_shows_the_changes_against_the_saved_text() {
+        let mut app = app_with_focus("$model", Focus::Layout);
+        press(&mut app, KeyCode::Char('a')); // 行を足して、未保存の変更にする
+        press(&mut app, KeyCode::Char('t'));
+        let (screen, overlays) = render(&app, 100, 30);
+        let shown = screen.join("\n");
+        for expected in [
+            "差分 ─ 保存済み → 下書き",
+            "変更箇所",
+            "@@ ",
+            "Esc / t / d: 閉じる",
+        ] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+        assert!(
+            shown.lines().any(|l| l.contains("│+ ")) || shown.contains("+ format"),
+            "追加行が `+` で出る\n{shown}"
+        );
+        // 差分の間は、配置・部品一覧と、部品の表示例（生 ANSI）を出さない。プレビューは出す
+        assert_eq!(overlays.len(), 1, "プレビューだけ");
+        assert!(!shown.contains("この行は出力されません"), "{shown}");
+
+        // `f` で全文に切り替わり、先頭に変更のない行も出る
+        press(&mut app, KeyCode::Char('f'));
+        let full = text(&app, 100, 30);
+        assert!(full.contains("─ 全文"), "{full}");
+        assert!(!full.contains("@@ "), "全文には見出しがない\n{full}");
+    }
+
+    #[test]
+    fn test_diff_view_without_changes_says_so() {
+        let mut app = new_app();
+        press(&mut app, KeyCode::Char('t'));
+        let shown = text(&app, 100, 30);
+        assert!(
+            shown.contains("変更はありません（f: 全文を表示）"),
+            "{shown}"
+        );
+        assert!(shown.contains("+0 -0"), "{shown}");
+        // 全文に切り替えれば、変更がなくても内容は読める
+        press(&mut app, KeyCode::Char('f'));
+        assert!(text(&app, 100, 30).contains("format"));
+    }
+
+    #[test]
+    fn test_diff_view_scrolls_a_long_diff() {
+        // 全文が高さを超える設定（先頭に 60 行のコメント）。末尾の `format` の行が変わる
+        let comments = (0..60).fold(String::new(), |mut toml, i| {
+            use std::fmt::Write;
+            writeln!(toml, "# comment {i:02}").unwrap();
+            toml
+        });
+        let mut app = app_from_toml(&comments);
+        app.focus = Focus::Layout;
+        press(&mut app, KeyCode::Char('a')); // 行を足して、`format` を追加する
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('f'));
+
+        let first = text(&app, 100, 20);
+        assert!(first.contains("# comment 00"), "{first}");
+        assert!(first.contains("↓ 続きがあります"), "{first}");
+        assert!(!first.contains("# comment 59"), "{first}");
+
+        press(&mut app, KeyCode::End);
+        let last = text(&app, 100, 20);
+        assert!(last.contains("# comment 59"), "{last}");
+        assert!(!last.contains("↓ 続きがあります"), "{last}");
+        assert!(!last.contains("# comment 00"), "{last}");
+
+        press(&mut app, KeyCode::Home);
+        assert!(text(&app, 100, 20).contains("# comment 00"));
+        // PageDown は、10 行ずつ進む
+        press(&mut app, KeyCode::PageDown);
+        let paged = text(&app, 100, 20);
+        assert!(!paged.contains("# comment 00"), "{paged}");
+        assert!(paged.contains("# comment 10"), "{paged}");
+    }
+
+    #[test]
+    fn test_diff_view_wraps_long_lines_and_survives_tiny_terminals() {
+        let long = "x".repeat(300);
+        let toml = format!("# {long}\n");
+        let mut app = app_from_toml(&toml);
+        app.focus = Focus::Layout;
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('f'));
+        let shown = text(&app, 60, 30);
+        assert!(
+            shown.matches("xxxxxxxxxx").count() >= 4,
+            "折り返される\n{shown}"
+        );
+        for (width, height) in [(1, 1), (3, 3), (10, 5), (20, 8), (40, 12)] {
+            let _ = render(&app, width, height);
+        }
+    }
+
+    #[test]
+    fn test_conflict_prompt_offers_the_diff_and_shows_the_disk_diff_title() {
+        let storage = crate::tui::storage::fake::FakeStorage::default();
+        let mut app =
+            App::with_storage_for_test(Draft::with_format("$model"), Box::new(storage.clone()));
+        press(&mut app, KeyCode::Char('a'));
+        {
+            let mut state = storage.0.borrow_mut();
+            state.save_error = Some(crate::editor::save::SaveError::Conflict(
+                ConflictKind::Changed,
+            ));
+            state.disk = Some("format = \"$plan\"\n".to_string());
+        }
+        press(&mut app, KeyCode::Char('s'));
+        let prompt = text(&app, 130, 30);
+        assert!(prompt.contains("d: 差分を見る"), "{prompt}");
+        assert!(
+            prompt.contains("r: 再読み込み（今の編集を破棄）"),
+            "{prompt}"
+        );
+
+        press(&mut app, KeyCode::Char('d'));
+        let shown = text(&app, 130, 30);
+        assert!(shown.contains("ディスク上の今の内容 → 下書き"), "{shown}");
+        assert!(shown.contains("$plan"), "{shown}");
+
+        // 読めないときは、理由を添えて、選択を残す
+        press(&mut app, KeyCode::Esc);
+        storage.0.borrow_mut().read_error = Some("permission denied".to_string());
+        press(&mut app, KeyCode::Char('d'));
+        let failed = text(&app, 160, 30);
+        assert!(failed.contains("permission denied"), "{failed}");
+        assert!(failed.contains("d: 差分を見る"), "{failed}");
     }
 
     #[test]
