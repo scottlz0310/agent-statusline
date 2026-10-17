@@ -1,6 +1,6 @@
 # 設定 TUI の実機確認（Windows）
 
-フェーズ 2（トラッカー #84）の実機確認のうち、Windows の結果。ネイティブ Ubuntu の結果は、確認後に別途追記する。
+フェーズ 2（トラッカー #84）の実機確認のうち、Windows の結果。Ubuntu の結果は `config-tui-verification-ubuntu.md`。
 
 ## 環境
 
