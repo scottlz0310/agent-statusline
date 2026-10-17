@@ -104,10 +104,7 @@ fn event_loop(terminal: &mut DefaultTerminal, mut app: App) -> io::Result<()> {
             terminal.clear()?;
             let mut overlays = Vec::new();
             terminal.draw(|frame| overlays = draw(frame, app))?;
-            for overlay in &overlays {
-                write_overlay(overlay)?;
-            }
-            Ok(())
+            write_overlays(&mut io::stdout(), &overlays)
         },
         event::read,
     )
@@ -156,20 +153,29 @@ fn needs_redraw(event: &Event) -> bool {
     }
 }
 
-/// プレビューを、ratatui を介さず生の ANSI として端末へ出す。直前の内容を空白で消してから書く
-fn write_overlay(overlay: &RawOverlay) -> io::Result<()> {
-    let mut out = io::stdout();
-    let blank = " ".repeat(usize::from(overlay.width));
-    for (row, line) in (0..).zip(&overlay.lines) {
-        queue!(
-            out,
-            MoveTo(overlay.x, overlay.y + row),
-            Print(&blank),
-            MoveTo(overlay.x, overlay.y + row),
-            Print(line),
-            Print("\x1b[0m")
-        )?;
+/// カーソルの位置の保存と復元（DECSC / DECRC）
+const SAVE_CURSOR: &str = "\x1b7";
+const RESTORE_CURSOR: &str = "\x1b8";
+
+/// プレビューなどを、ratatui を介さず生の ANSI として端末へ出す。直前の内容を空白で消してから書く。
+/// 書く前後でカーソルの位置を戻す。入力中は、ratatui が入力欄にカーソルを置いており（IME の変換ウィンドウは
+/// そこに出る）、書いた末尾に残ると、変換ウィンドウが別の位置に出る
+fn write_overlays(out: &mut impl Write, overlays: &[RawOverlay]) -> io::Result<()> {
+    queue!(out, Print(SAVE_CURSOR))?;
+    for overlay in overlays {
+        let blank = " ".repeat(usize::from(overlay.width));
+        for (row, line) in (0..).zip(&overlay.lines) {
+            queue!(
+                out,
+                MoveTo(overlay.x, overlay.y + row),
+                Print(&blank),
+                MoveTo(overlay.x, overlay.y + row),
+                Print(line),
+                Print("\x1b[0m")
+            )?;
+        }
     }
+    queue!(out, Print(RESTORE_CURSOR))?;
     out.flush()
 }
 
@@ -186,6 +192,33 @@ mod tests {
         enable_color_output();
         let sequence = Colored::ForegroundColor(Color::DarkCyan).to_string();
         assert!(!sequence.is_empty(), "色の指定が出力されない");
+    }
+
+    #[test]
+    fn test_write_overlays_restores_the_cursor() {
+        let overlay = |x, lines: &[&str]| RawOverlay {
+            x,
+            y: 1,
+            width: 6,
+            lines: lines.iter().map(ToString::to_string).collect(),
+        };
+        for (name, overlays) in [
+            ("none", vec![]),
+            ("one", vec![overlay(2, &["a"])]),
+            ("two", vec![overlay(2, &["a", "b"]), overlay(30, &["c"])]),
+        ] {
+            let mut out = Vec::new();
+            write_overlays(&mut out, &overlays).unwrap();
+            let written = String::from_utf8(out).unwrap();
+            // 書く前に保存し、最後に戻す。途中では、保存も復元もしない
+            assert!(written.starts_with(SAVE_CURSOR), "{name}: {written:?}");
+            assert!(written.ends_with(RESTORE_CURSOR), "{name}: {written:?}");
+            assert_eq!(written.matches(SAVE_CURSOR).count(), 1, "{name}");
+            assert_eq!(written.matches(RESTORE_CURSOR).count(), 1, "{name}");
+            for line in overlays.iter().flat_map(|overlay| &overlay.lines) {
+                assert!(written.contains(line.as_str()), "{name}: {line}");
+            }
+        }
     }
 
     fn key(code: KeyCode, kind: KeyEventKind) -> Event {
