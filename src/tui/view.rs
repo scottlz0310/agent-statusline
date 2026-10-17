@@ -11,13 +11,14 @@ use crate::editor::diff::{DiffMode, LineKind};
 use crate::editor::layout::Token;
 use crate::editor::layout_edit::LayoutEditor;
 use crate::editor::save::ConflictKind;
+use crate::editor::style_spec::{Layer, StyleColor};
 use crate::editor::update::PropValue;
 use crate::editor::validate::Severity;
 use crate::engine::config::Config;
 use crate::engine::parts::PropKind;
 use crate::preview::width::{Overflow, display_width, fit_line, symbol_notes};
 use crate::preview::{layout_visibility, render_part_sample, render_preview};
-use crate::tui::app::{App, DiffBase, Focus, InputTarget, Mode, WidthChoice};
+use crate::tui::app::{App, DiffBase, Focus, InputTarget, Mode, STYLE_ROWS, StyleRow, WidthChoice};
 use crate::tui::palette::{self, PaletteItem};
 
 /// プレビューの最大の表示行数。それ以上は、切り詰めて表示する
@@ -116,6 +117,9 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<RawOverlay> {
         if app.picker.is_some() {
             // 記号の候補を選んでいる間は、部品一覧の場所に候補を出す（部品の表示例の生 ANSI と重ならない）
             draw_picker(frame, app, parts);
+        } else if app.style_editor.is_some() {
+            // スタイルを選んでいる間も、同じ場所に編集画面を出す
+            draw_style_editor(frame, app, parts);
         } else {
             overlays.extend(draw_parts(frame, app, config, parts, columns));
         }
@@ -145,6 +149,9 @@ fn footer_text(app: &App) -> &'static str {
     }
     if app.picker.is_some() {
         return "記号を選ぶ  ↑↓: 選ぶ  Enter: 決定  e: 自由に入力  Esc: 閉じる";
+    }
+    if app.style_editor.is_some() {
+        return "スタイルを選ぶ  ↑↓: 行  ←→ Space: 色・装飾を切り替え  Enter: 決定  e: 自由に入力  Esc: 取り消し";
     }
     if app.issues_view.is_some() {
         return "検証結果  ↑↓: 選ぶ（長い項目は 1 行ずつスクロール）  Esc / v: 閉じる";
@@ -710,6 +717,108 @@ fn status_line(app: &App) -> Line<'static> {
         ),
         style,
     )
+}
+
+/// 色の見本に使う端末の色（SGR 37 の `white` は ratatui の `Gray`、SGR 90 の `gray` は `DarkGray`）
+fn swatch_color(color: StyleColor) -> Color {
+    match color {
+        StyleColor::Black => Color::Black,
+        StyleColor::Red => Color::Red,
+        StyleColor::Green => Color::Green,
+        StyleColor::Yellow => Color::Yellow,
+        StyleColor::Blue => Color::Blue,
+        StyleColor::Magenta => Color::Magenta,
+        StyleColor::Cyan => Color::Cyan,
+        StyleColor::White => Color::Gray,
+        StyleColor::Gray => Color::DarkGray,
+    }
+}
+
+/// スタイル（色・装飾）のトグル選択（部品一覧の場所）。行ごとに現在の選択を示し、決まる仕様の文字列を併記する。
+/// 触らない既存のトークン（認識できないもの、複数の指定）は、その旨を添える
+fn draw_style_editor(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(editor) = &app.style_editor else {
+        return;
+    };
+    let block = focus_block(format!(" スタイル: {}.{} ", editor.part, editor.key), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let spec = editor.spec();
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, row) in STYLE_ROWS.iter().enumerate() {
+        let marker = if index == editor.row() { "> " } else { "  " };
+        let mut spans = vec![Span::raw(marker)];
+        match row {
+            StyleRow::Color(layer) => {
+                let (label, count) = match layer {
+                    Layer::Foreground => ("前景", spec.color_count(Layer::Foreground)),
+                    Layer::Background => ("背景", spec.color_count(Layer::Background)),
+                };
+                let current = spec.color(*layer);
+                spans.push(Span::raw(format!("{label}  ‹ ")));
+                spans.push(Span::raw(current.map_or("なし", StyleColor::name)));
+                spans.push(Span::raw(" ›"));
+                if let Some(color) = current {
+                    // 見本。前景は文字の色、背景は塗りで示す
+                    let style = match layer {
+                        Layer::Foreground => Style::default().fg(swatch_color(color)),
+                        Layer::Background => Style::default().bg(swatch_color(color)),
+                    };
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        if *layer == Layer::Foreground {
+                            "Aa"
+                        } else {
+                            "  "
+                        },
+                        style,
+                    ));
+                }
+                if count > 1 {
+                    spans.push(Span::styled(format!("  （{count} 個指定）"), dim));
+                }
+            }
+            StyleRow::Decoration(decoration) => {
+                let mark = if spec.has(*decoration) { "x" } else { " " };
+                spans.push(Span::raw(format!("[{mark}] {}", decoration.name())));
+            }
+        }
+        let line = Line::from(spans);
+        lines.push(if index == editor.row() {
+            line.style(Style::default().add_modifier(Modifier::BOLD))
+        } else {
+            line
+        });
+    }
+    lines.push(Line::raw(""));
+    let text = spec.text();
+    lines.push(Line::from(format!(
+        "結果: {}",
+        if text.is_empty() {
+            "（なし）".to_string()
+        } else {
+            neutralize(&text)
+        }
+    )));
+    let unknown = spec.unknown_tokens();
+    if !unknown.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "認識できないトークン（そのまま残ります）: {}",
+                neutralize(&unknown.join(" "))
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    let height = usize::from(inner.height);
+    let offset = (editor.row() + 1).saturating_sub(height);
+    let visible: Vec<Line> = lines.into_iter().skip(offset).take(height).collect();
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 /// 設定ファイル由来の文字列を画面に出すための無害化。タブは空白に、そのほかの制御文字は `U+FFFD` にする
@@ -1682,6 +1791,90 @@ mod tests {
     }
 
     #[test]
+    fn test_style_editor_shows_rows_result_and_footer() {
+        let mut app = props_app("$directory");
+        // 先頭の `format` から、`folder_style`（3 行目）へ進んで開く
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        let (screen, overlays) = render(&app, 120, 40);
+        let shown = screen.join("\n");
+        for expected in [
+            "スタイル: directory.folder_style",
+            "前景  ‹ cyan ›",
+            "背景  ‹ なし ›",
+            "[x] bold",
+            "[ ] dimmed",
+            "[ ] inverted",
+            "結果: bold cyan",
+            "スタイルを選ぶ  ↑↓: 行",
+        ] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+        // 選んでいる間は、部品一覧の場所に出し、部品の表示例（生 ANSI）は出さない。プレビューは出す
+        assert_eq!(overlays.len(), 1, "プレビューだけ");
+        assert!(shown.contains("> 前景"), "先頭の行が選ばれている\n{shown}");
+
+        // 色と装飾を変えると、画面とプレビューの結果が変わる
+        press(&mut app, KeyCode::Right); // cyan → white
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Right); // 背景 → black
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' ')); // bold をオフ
+        let shown = text(&app, 120, 40);
+        for expected in [
+            "前景  ‹ white ›",
+            "背景  ‹ black ›",
+            "[ ] bold",
+            "結果: white bg:black",
+        ] {
+            assert!(shown.contains(expected), "{expected}\n{shown}");
+        }
+    }
+
+    #[test]
+    fn test_style_editor_reports_unknown_and_multiple_tokens() {
+        let toml = "[directory]\nfolder_style = \"cyna bold red green\"\n";
+        let config = toml_edit::de::from_str::<Config>(toml).unwrap();
+        let mut app = App::for_test(Draft::new(config, toml.parse().unwrap()));
+        press(&mut app, KeyCode::Tab);
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        let shown = text(&app, 120, 40);
+        assert!(
+            shown.contains("認識できないトークン（そのまま残ります）: cyna"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("前景  ‹ green ›"),
+            "効いているのは最後の色\n{shown}"
+        );
+        assert!(shown.contains("（2 個指定）"), "{shown}");
+        assert!(shown.contains("結果: cyna bold red green"), "{shown}");
+    }
+
+    #[test]
+    fn test_style_editor_survives_tiny_terminals() {
+        let mut app = props_app("$directory");
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Down);
+        }
+        for (width, height) in [(1, 1), (3, 3), (10, 5), (20, 8), (40, 12)] {
+            let _ = render(&app, width, height);
+        }
+        // 最後の行（inverted）を選んでいても、狭い高さで選択行が見える
+        let shown = text(&app, 100, 14);
+        assert!(shown.contains("> [ ] inverted"), "{shown}");
+    }
+
+    #[test]
     fn test_clip_spans() {
         let plain = Style::default();
         let bold = Style::default().add_modifier(Modifier::BOLD);
@@ -2284,6 +2477,7 @@ mod tests {
             press(&mut app, KeyCode::Down); // style
         }
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('e')); // スタイルは、編集画面から自由入力に切り替える
         for c in " nonexistent".chars() {
             press(&mut app, KeyCode::Char(c));
         }
