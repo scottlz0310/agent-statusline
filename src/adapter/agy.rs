@@ -81,8 +81,14 @@ impl StatuslineAdapter for AntigravityAdapter {
         let mut ratelimit_limits = Vec::new();
 
         if let Some(quota_map) = input.quota {
-            // 表示順序を安定化 (gemini-5h, gemini-weekly, 3p-5h, 3p-weekly, その他)
-            let priority_order = ["gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly"];
+            // 表示順序を安定化 (gemini-5h, gemini-weekly, gemini-argon-wtu-weekly, 3p-5h, 3p-weekly, その他)
+            let priority_order = [
+                "gemini-5h",
+                "gemini-weekly",
+                "gemini-argon-wtu-weekly",
+                "3p-5h",
+                "3p-weekly",
+            ];
             let mut keys: Vec<String> = quota_map.keys().cloned().collect();
             keys.sort_by_key(|k| {
                 priority_order
@@ -100,6 +106,7 @@ impl StatuslineAdapter for AntigravityAdapter {
                     let label = match key.as_str() {
                         "gemini-5h" => "Gemini 5h".to_string(),
                         "gemini-weekly" => "Gemini Wk".to_string(),
+                        "gemini-argon-wtu-weekly" => "Argon Wk".to_string(),
                         "3p-5h" => "3P 5h".to_string(),
                         "3p-weekly" => "3P Wk".to_string(),
                         other => other.to_string(),
@@ -212,5 +219,37 @@ mod tests {
         let p = payload.unwrap();
         assert_eq!(p.agent_id, "agy");
         assert_eq!(p.limits.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_agy_with_argon() {
+        let raw = r#"{
+            "quota": {
+                "3p-5h": { "remaining_fraction": 1.0, "reset_time": "2026-10-17T06:11:20Z", "reset_in_seconds": 17710 },
+                "gemini-argon-wtu-weekly": { "remaining_fraction": 0.95, "reset_time": "2026-10-24T01:11:20Z", "reset_in_seconds": 607870 },
+                "gemini-5h": { "remaining_fraction": 0.9, "reset_time": "2026-10-17T05:12:16Z", "reset_in_seconds": 14160 }
+            }
+        }"#;
+
+        let adapter = AntigravityAdapter;
+        let (state, payload) = adapter.parse(raw);
+
+        assert_eq!(state.quotas.len(), 3);
+        // priority_order: gemini-5h, gemini-argon-wtu-weekly, 3p-5h
+        assert_eq!(state.quotas[0].id, "gemini-5h");
+        assert_eq!(state.quotas[0].label, "Gemini 5h");
+        assert_eq!(state.quotas[0].used_percentage, Some(10));
+
+        assert_eq!(state.quotas[1].id, "gemini-argon-wtu-weekly");
+        assert_eq!(state.quotas[1].label, "Argon Wk");
+        assert_eq!(state.quotas[1].used_percentage, Some(5));
+
+        assert_eq!(state.quotas[2].id, "3p-5h");
+        assert_eq!(state.quotas[2].label, "3P 5h");
+        assert_eq!(state.quotas[2].used_percentage, Some(0));
+
+        let p = payload.expect("payload should exist");
+        assert_eq!(p.limits[1].id, "gemini-argon-wtu-weekly");
+        assert_eq!(p.limits[1].label, "Argon Wk");
     }
 }

@@ -186,6 +186,10 @@ pub fn render_quota(cfg: &QuotaConfig, state: &StatuslineState) -> String {
             continue;
         };
 
+        if cfg.hide_zero && pct == 0 {
+            continue;
+        }
+
         let style = pct_style_name(
             pct,
             &cfg.style_normal,
@@ -538,6 +542,56 @@ mod tests {
         // ANSI カラーコードが付与されていること
         assert!(rendered.contains("\x1b[32m")); // green
         assert!(rendered.contains("\x1b[31m")); // red
+    }
+
+    #[test]
+    fn test_render_quota_hide_zero() {
+        let mut config = Config::default();
+        config.quota.hide_zero = true;
+
+        let state = StatuslineState {
+            cwd: PathBuf::from("."),
+            model: None,
+            context_used_percentage: None,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            agent_state: None,
+            sandbox_enabled: false,
+            plan_tier: None,
+            quotas: vec![
+                QuotaItem {
+                    id: "q1".to_string(),
+                    label: "Quota 1".to_string(),
+                    used_percentage: Some(0),
+                    reset_in_seconds: Some(120),
+                    reset_time_iso: None,
+                },
+                QuotaItem {
+                    id: "q2".to_string(),
+                    label: "Quota 2".to_string(),
+                    used_percentage: Some(15),
+                    reset_in_seconds: None,
+                    reset_time_iso: None,
+                },
+            ],
+        };
+
+        let rendered = render_quota(&config.quota, &state);
+        assert!(!rendered.contains("Quota 1"));
+        assert!(rendered.contains("Quota 2: 15%"));
+
+        // 全て 0% の場合は空文字列になること
+        let state_all_zero = StatuslineState {
+            quotas: vec![QuotaItem {
+                id: "q1".to_string(),
+                label: "Quota 1".to_string(),
+                used_percentage: Some(0),
+                reset_in_seconds: Some(120),
+                reset_time_iso: None,
+            }],
+            ..state
+        };
+        assert_eq!(render_quota(&config.quota, &state_all_zero), "");
     }
 
     #[test]

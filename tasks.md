@@ -58,6 +58,12 @@
 - [x] レビュー依頼・キュー状態サマリ（`statusline-summary.json`）をカレントリポジトリ分だけ `$review` で表示 (#23)
 - [x] v0.3.0 リリース
 
+## レートリミット表示の改善
+
+- [x] Antigravity の Argon クォータ (`gemini-argon-wtu-weekly`) の表示順序とラベルマッピング (`Argon Wk`) を追加
+- [x] `[quota] hide_zero` 設定の実装（使用率 0% のクォータ項目を非表示化）と設定 TUI・バリデーション連携
+
+
 ## 設定 TUI (`agent-statusline config`)
 
 基本設計: [docs/agent-statusline-config-tui-design.md](docs/agent-statusline-config-tui-design.md)
