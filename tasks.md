@@ -64,6 +64,11 @@
 - [x] `[quota] hide_zero` 設定の実装（使用率 0% のクォータ項目を非表示化）と設定 TUI・バリデーション連携 (#71)
 - [x] v0.4.1 リリース
 
+## 依存関係・セキュリティ
+
+- [x] `zip` v9 への更新（RUSTSEC-2026-0367 / 0368 / 0369 対応）と `ZipFile::name()` の `Result` 対応 (#73, #74)
+- [x] v0.4.2 リリース
+
 ## 設定 TUI (`agent-statusline config`)
 
 基本設計: [docs/agent-statusline-config-tui-design.md](docs/agent-statusline-config-tui-design.md)

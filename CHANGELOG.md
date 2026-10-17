@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-17
+
 ### Security
-- `zip` crate を v9 に更新 (RUSTSEC-2026-0367 / 0368 / 0369)。v9 で `ZipFile::name()` が `Result` を返すようになったため、自己更新の ZIP 展開で不正なエントリ名を `InvalidData` エラーとして伝播する (#73)。
+- `zip` crate を v9 に更新 (RUSTSEC-2026-0367 / 0368 / 0369)。v9 で `ZipFile::name()` が `Result` を返すようになったため、自己更新の ZIP 展開で不正なエントリ名を `InvalidData` エラーとして伝播する (#73)。`Cargo.toml` の下限も修正済みの 9.0.4 に引き上げ (#74)。
+
+### Changed
+- README の `cargo install` 例を、このリリースの `v0.4.2` に更新。
 
 ## [0.4.1] - 2026-10-17
 
