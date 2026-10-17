@@ -18,7 +18,7 @@ terminal_size = "0.4.4"
 toml_edit = { version = "0.25.17", features = ["serde"] }
 gix = { version = "0.89.0", default-features = false, features = ["status", "revision", "sha1"] }
 ureq = { version = "3.4.2", features = ["json"] }
-zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 sha2 = "0.11.1"
 unicode-width = "0.2.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
