@@ -96,7 +96,9 @@ pub fn extract_binary_from_zip(zip_bytes: &[u8], binary_name: &str) -> io::Resul
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let name = file.name();
+        let name = file
+            .name()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if name == binary_name
             || name.ends_with(&format!("/{binary_name}"))
             || name.ends_with(&format!("\\{binary_name}"))
