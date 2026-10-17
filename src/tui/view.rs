@@ -1295,9 +1295,9 @@ mod tests {
 
     #[test]
     fn test_props_rows_are_capped_and_scroll_to_the_selection() {
-        // quota は 9 個のプロパティを持つ。上限の行数で、選択中の行が見えるようにずらす
+        // quota は 10 個のプロパティを持つ。上限の行数で、選択中の行が見えるようにずらす
         let mut app = props_app("$quota");
-        for _ in 0..8 {
+        for _ in 0..9 {
             press(&mut app, KeyCode::Down);
         }
         let shown = text(&app, 110, 50);

@@ -166,6 +166,7 @@ pub static PARTS: [PartSpec; 10] = [
             prop("style_normal", PropKind::Style),
             prop("style_warning", PropKind::Style),
             prop("style_critical", PropKind::Style),
+            prop("hide_zero", PropKind::Bool),
             DISABLED,
         ],
         render: |c, i| render_quota(&c.quota, i.state),

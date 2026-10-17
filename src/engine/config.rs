@@ -359,6 +359,9 @@ pub struct QuotaConfig {
     pub style_critical: String,
 
     #[serde(default)]
+    pub hide_zero: bool,
+
+    #[serde(default)]
     pub disabled: bool,
 }
 
@@ -383,6 +386,7 @@ impl Default for QuotaConfig {
             style_normal: default_style_normal(),
             style_warning: default_style_warning(),
             style_critical: default_style_critical(),
+            hide_zero: false,
             disabled: false,
         }
     }

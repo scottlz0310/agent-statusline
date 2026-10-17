@@ -162,6 +162,7 @@ style_critical = "red"
 symbol = "⏳ "
 format = "[$symbol$label: $percentage (rst $reset_time)]($style) "
 separator = "  |  "
+hide_zero = false                    # true にすると使用率 0% のクォータ項目を非表示
 
 [review]
 symbol = "🐿 "
