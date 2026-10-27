@@ -13,6 +13,7 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステー�
   - **Antigravity CLI (`agy`)**
   - **Claude Code (`claude`)**
   - **GitHub Copilot CLI (`copilot`)**
+  - **Codex CLI は未対応**です。Codex CLI には組み込みステータスラインがありますが、外部レンダラーを呼び出す公式フックがないため、`agent-statusline` を接続できません。要望は [openai/codex#17827](https://github.com/openai/codex/issues/17827) で追跡されています。
 - 🛠️ **設定自動化 (`install` / `uninstall` / `status`)**:
   - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` 等）への statusline コマンド登録・解除をワンコマンドで自動実行。
 - 🐿️ **Squirrel Notifier 連携**:

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README に Codex CLI の対応状況と、外部レンダラー連携を妨げている公式フックの未提供、および upstream Issue #17827 を追記。
+
 ## [0.5.0] - 2026-10-17
 
 ### Added
