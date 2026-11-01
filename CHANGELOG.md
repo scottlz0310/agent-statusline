@@ -150,3 +150,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-client architecture design for Antigravity CLI, Claude Code, and GitHub Copilot CLI.
 - Zero-downtime self-update design (`agent-statusline update` and background release check).
 - Task management and tracking document (`tasks.md`).
+
+[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...HEAD
