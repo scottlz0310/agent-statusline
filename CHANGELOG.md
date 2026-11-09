@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.cargo/config.toml`: `registry.global-min-publish-age = "3 days"` を追加（Rust 1.100 以降で有効）。公開から 3 日未満のクレートを新規に解決しない。lock file maintenance は Renovate の minimumReleaseAge を迂回するため、無人の自動マージに対する防御として cargo 側で止める
+
 ### Changed
 - README に Codex CLI の対応状況と、外部レンダラー連携を妨げている公式フックの未提供、および upstream Issue #17827 を追記。
 - `renovate.json` の `extends` から、中央プリセットで解除済みの非推奨プリセット（`options/automerge`・`options/schedule`・`options/security`）への参照を削除した。スケジュール・待機期間・自動マージ等は中央側で既に解除されているため更新の挙動は変わらず、Dependency Dashboard の警告表示が消える。
