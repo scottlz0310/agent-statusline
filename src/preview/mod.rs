@@ -83,8 +83,7 @@ pub fn layout_visibility(
                     }
                     Token::Part(id) => {
                         let sample = render_part_sample(config, scenario, id, columns)
-                            .map(|sample| strip_ansi(&sample))
-                            .unwrap_or_default();
+                            .map_or_default(|sample| strip_ansi(&sample));
                         text.push_str(&sample);
                         sample.trim().is_empty()
                     }
