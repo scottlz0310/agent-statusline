@@ -2830,12 +2830,12 @@ mod tests {
 
     #[test]
     fn test_restore_of_an_identical_generation_does_nothing() {
-        let (mut app, _storage) = app_with_history("$model", vec![]);
+        let (mut app, storage) = app_with_history("$model", vec![]);
         let same = Generation {
             recorded_at: None,
             text: app.draft.to_toml(),
         };
-        _storage.0.borrow_mut().generations = vec![same];
+        storage.0.borrow_mut().generations = vec![same];
         press(&mut app, KeyCode::Char('H'));
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Enter);

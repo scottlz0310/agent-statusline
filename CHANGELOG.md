@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `renovate.json` の `extends` から、中央プリセットで解除済みの非推奨プリセット（`options/automerge`・`options/schedule`・`options/security`）への参照を削除した。スケジュール・待機期間・自動マージ等は中央側で既に解除されているため更新の挙動は変わらず、Dependency Dashboard の警告表示が消える。
 - `tasks.md` を撤去した。進捗とタスクは Issue と Pull Request、リポジトリの外のハンドオフで管理する（全項目が完了済みで、参照もなかった）。
 
+### Fixed
+- Rust 1.100.0 の Clippy（`clippy::map_unwrap_or`・`clippy::used_underscore_binding`）で警告となっていた箇所を修正（`src/preview/mod.rs`、`src/tui/app.rs`）。
+
 ## [0.5.0] - 2026-10-17
 
 ### Added
