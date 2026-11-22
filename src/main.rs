@@ -14,7 +14,7 @@ mod updater;
 use std::io::{self, Read};
 
 use clap::Parser;
-use cli::{AgentKind, Cli, Commands, McpTarget};
+use cli::{AgentKind, Cli, Commands, McpTarget, RenderAgentKind};
 
 use adapter::StatuslineAdapter;
 use adapter::agy::AntigravityAdapter;
@@ -67,7 +67,7 @@ fn main() -> io::Result<()> {
 }
 
 fn cmd_render(
-    agent: AgentKind,
+    agent: RenderAgentKind,
     config_path: Option<&std::path::Path>,
     bench: bool,
 ) -> io::Result<()> {
@@ -86,9 +86,9 @@ fn cmd_render(
     let config = engine::config::load_config(config_path);
 
     let adapter: Box<dyn StatuslineAdapter> = match agent {
-        AgentKind::Agy => Box::new(AntigravityAdapter),
-        AgentKind::Claude => Box::new(ClaudeAdapter),
-        AgentKind::Copilot => Box::new(CopilotAdapter),
+        RenderAgentKind::Agy => Box::new(AntigravityAdapter),
+        RenderAgentKind::Claude => Box::new(ClaudeAdapter),
+        RenderAgentKind::Copilot => Box::new(CopilotAdapter),
     };
 
     let (state, ratelimit_payload) = adapter.parse(&input);
@@ -146,7 +146,10 @@ fn cmd_install(agents: Vec<AgentKind>, all: bool, dry_run: bool) -> io::Result<(
                     println!("  {DIMMED}Backup saved to {}{RESET}", bak.display());
                 }
                 if let Some(preview) = res.preview {
-                    println!("{CYAN}Preview JSON:{RESET}\n{preview}");
+                    println!(
+                        "{CYAN}Preview {}:{RESET}\n{preview}",
+                        res.agent.config_format_label()
+                    );
                 }
             }
             PatchAction::AlreadyInstalled => {
@@ -187,7 +190,10 @@ fn cmd_uninstall(agents: Vec<AgentKind>, all: bool, dry_run: bool) -> io::Result
                     println!("  {DIMMED}Backup saved to {}{RESET}", bak.display());
                 }
                 if let Some(preview) = res.preview {
-                    println!("{CYAN}Preview JSON:{RESET}\n{preview}");
+                    println!(
+                        "{CYAN}Preview {}:{RESET}\n{preview}",
+                        res.agent.config_format_label()
+                    );
                 }
             }
             PatchAction::RestoredBackup => {
@@ -205,7 +211,10 @@ fn cmd_uninstall(agents: Vec<AgentKind>, all: bool, dry_run: bool) -> io::Result
                     println!("  {DIMMED}Backup saved to {}{RESET}", bak.display());
                 }
                 if let Some(preview) = res.preview {
-                    println!("{CYAN}Preview JSON:{RESET}\n{preview}");
+                    println!(
+                        "{CYAN}Preview {}:{RESET}\n{preview}",
+                        res.agent.config_format_label()
+                    );
                 }
             }
             PatchAction::SkippedCustom => {
@@ -259,6 +268,19 @@ fn cmd_status() {
                     println!("    Enabled: {en}");
                 }
             }
+            StatusKind::Incomplete(issues) => {
+                println!(
+                    "  {YELLOW}▲{RESET} {BOLD}{}{RESET} ({YELLOW}Incomplete{RESET})",
+                    report.agent.display_name()
+                );
+                println!("    Path:    {}", report.path.display());
+                if let Some(cmd) = report.command {
+                    println!("    Command: {cmd}");
+                }
+                for issue in issues {
+                    println!("    Issue:   {issue}");
+                }
+            }
             StatusKind::Custom(cmd) => {
                 println!(
                     "  {YELLOW}▲{RESET} {BOLD}{}{RESET} ({YELLOW}Custom Statusline{RESET})",
@@ -281,9 +303,9 @@ fn cmd_status() {
                 );
                 println!("    Path:    {}", report.path.display());
             }
-            StatusKind::InvalidJson(err) => {
+            StatusKind::InvalidConfig(err) => {
                 println!(
-                    "  {RED}✕{RESET} {BOLD}{}{RESET} ({RED}Invalid JSON{RESET})",
+                    "  {RED}✕{RESET} {BOLD}{}{RESET} ({RED}Invalid Config{RESET})",
                     report.agent.display_name()
                 );
                 println!("    Path:    {}", report.path.display());
@@ -302,7 +324,7 @@ fn resolve_agents(agents: Vec<AgentKind>, all: bool) -> io::Result<Vec<AgentKind
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No agent specified. Use '--all' or '--agent <agy,claude,copilot>'",
+            "No agent specified. Use '--all' or '--agent <agy,claude,copilot,codex>'",
         ))
     }
 }

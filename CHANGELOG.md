@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `install` / `uninstall` / `status` コマンドで Codex CLI（`$CODEX_HOME/config.toml`、既定 `~/.codex/config.toml`）に対応（`--all` 含む）。コメント保持の TOML 部分更新、`[features] tui_extensions_statusline = true` / `[mcp_servers.agent-statusline]` / `[tui] status_line_provider` の自動設定・整合診断・`.bak` バックアップからの独自プロバイダー復元をサポート (#136)。
 - Codex CLI 向け stdio MCP ステータスラインサーバー（`agent-statusline mcp codex`）を追加。改行区切り JSON-RPC 2.0 での `tools/list` / `resources/read` 応答、設定・レビューサマリの mtime キャッシュ、Git 状態の非ブロッキング TTL キャッシュを備える (#136)。
 - Codex CLI の Custom status line（`com.openai/codex-statusline-state`）を内部状態へ変換する `CodexAdapter` と、スタイル中間表現（`StyledSpan`）から Codex `UiTree` JSON を生成する変換基盤を追加 (#136)。
 - `.cargo/config.toml`: `registry.global-min-publish-age = "3 days"` を追加（Rust 1.100 以降で有効）。公開から 3 日未満のクレートを新規に解決しない。lock file maintenance は Renovate の minimumReleaseAge を迂回するため、無人の自動マージに対する防御として cargo 側で止める
