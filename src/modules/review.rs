@@ -9,11 +9,16 @@ pub fn default_summary_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|dir| dir.join("SquirrelNotifier").join("statusline-summary.json"))
 }
 
+/// サマリ JSON 文字列をパースする。破損・未対応スキーマは `None`
+pub fn parse_summary(content: &str) -> Option<ReviewSummary> {
+    let summary: ReviewSummary = serde_json::from_str(content).ok()?;
+    (summary.schema_version == SUPPORTED_SCHEMA_VERSION).then_some(summary)
+}
+
 /// サマリを読み込む。ファイル不在 (Squirrel Notifier 未起動)・破損・未対応スキーマは `None`
 pub fn load_summary(path: &Path) -> Option<ReviewSummary> {
     let content = std::fs::read_to_string(path).ok()?;
-    let summary: ReviewSummary = serde_json::from_str(&content).ok()?;
-    (summary.schema_version == SUPPORTED_SCHEMA_VERSION).then_some(summary)
+    parse_summary(&content)
 }
 
 /// 指定リポジトリ (`owner/repo`、大文字小文字を区別しない) のレビュー状態

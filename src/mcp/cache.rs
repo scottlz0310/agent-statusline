@@ -6,16 +6,17 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::engine::config::{Config, SquirrelNotifierConfig, load_config, resolve_config_path};
+use crate::engine::config::{Config, SquirrelNotifierConfig, resolve_config_path};
 use crate::engine::formatter::resolve_review_summary_path;
 use crate::model::review_summary::{RepoReviews, ReviewSummary};
 use crate::modules::git::{GitQuery, GitStatus, get_git_status};
-use crate::modules::review::{load_summary, reviews_for_repo};
+use crate::modules::review::{parse_summary, reviews_for_repo};
 
 /// Git 状態キャッシュの既定 TTL
 pub const DEFAULT_GIT_TTL: Duration = Duration::from_secs(3);
@@ -69,6 +70,13 @@ impl ConfigCache {
     }
 
     fn refresh(&mut self) {
+        self.refresh_with_reader(|path| fs::read_to_string(path));
+    }
+
+    fn refresh_with_reader<F>(&mut self, read_file: F)
+    where
+        F: FnOnce(&Path) -> io::Result<String>,
+    {
         let resolved = resolve_config_path(self.custom_path.as_deref());
         let current_stamp = resolved.as_deref().and_then(FileStamp::of);
 
@@ -76,11 +84,27 @@ impl ConfigCache {
             return;
         }
 
-        self.config = match resolved.as_deref() {
-            Some(path) if current_stamp.is_some() => load_config(Some(path)),
-            _ => Config::default(),
+        let (Some(path), Some(stamp)) = (resolved.as_deref(), current_stamp) else {
+            self.config = Config::default();
+            self.stamp = None;
+            return;
         };
-        self.stamp = current_stamp;
+
+        // 一時的な読み取り失敗（Windows の共有違反など）では stamp を更新せず、
+        // 既存のキャッシュを保持したまま次回ポーリングで再読込する。
+        let Ok(content) = read_file(path) else {
+            return;
+        };
+
+        self.config = match toml_edit::de::from_str::<Config>(&content) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                let p = path.display();
+                eprintln!("agent-statusline: failed to parse config at {p}: {err}");
+                Config::default()
+            }
+        };
+        self.stamp = Some(stamp);
     }
 }
 
@@ -101,6 +125,18 @@ impl ReviewSummaryCache {
         integration: &SquirrelNotifierConfig,
         repo: Option<&str>,
     ) -> RepoReviews {
+        self.reviews_for_with_reader(integration, repo, |path| fs::read_to_string(path))
+    }
+
+    fn reviews_for_with_reader<F>(
+        &mut self,
+        integration: &SquirrelNotifierConfig,
+        repo: Option<&str>,
+        read_file: F,
+    ) -> RepoReviews
+    where
+        F: FnOnce(&Path) -> io::Result<String>,
+    {
         let Some(repo) = repo else {
             return RepoReviews::default();
         };
@@ -109,11 +145,16 @@ impl ReviewSummaryCache {
         let current_stamp = path.as_deref().and_then(FileStamp::of);
 
         if current_stamp != self.stamp {
-            self.summary = path
-                .as_deref()
-                .filter(|_| current_stamp.is_some())
-                .and_then(load_summary);
-            self.stamp = current_stamp;
+            if let (Some(summary_path), Some(stamp)) = (path.as_deref(), current_stamp) {
+                // 一時的な読み取り失敗では stamp・既存サマリを更新せず次回再試行する
+                if let Ok(content) = read_file(summary_path) {
+                    self.summary = parse_summary(&content);
+                    self.stamp = Some(stamp);
+                }
+            } else {
+                self.summary = None;
+                self.stamp = None;
+            }
         }
 
         let Some(summary) = &self.summary else {
@@ -357,6 +398,25 @@ mod tests {
     }
 
     #[test]
+    fn test_config_cache_retries_after_transient_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cache = ConfigCache::new(Some(&path));
+
+        // 作成直後の一時読み取り失敗（共有違反など）では stamp を進めず、次回同一ファイルで復旧する
+        fs::write(&path, "[model]\nsymbol = \"M1 \"\n").unwrap();
+        cache.refresh_with_reader(|_| Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert_eq!(cache.config.model.symbol, "🤖 ");
+        assert_eq!(cache.get().model.symbol, "M1 ");
+
+        // 更新後の一時読み取り失敗では既存設定を保持し、次回同一 mtime/サイズでも再読込して反映する
+        fs::write(&path, "[model]\nsymbol = \"MODEL-2 \"\n").unwrap();
+        cache.refresh_with_reader(|_| Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert_eq!(cache.config.model.symbol, "M1 ");
+        assert_eq!(cache.get().model.symbol, "MODEL-2 ");
+    }
+
+    #[test]
     fn test_review_summary_cache_tracks_updates_and_removal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("statusline-summary.json");
@@ -391,6 +451,50 @@ mod tests {
                 .active
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_review_summary_cache_retries_after_transient_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("statusline-summary.json");
+        let integration = SquirrelNotifierConfig {
+            enabled: true,
+            output_dir: None,
+            summary_path: Some(path.to_string_lossy().to_string()),
+        };
+
+        let mut cache = ReviewSummaryCache::new();
+
+        // 作成直後の一時読み取り失敗では stamp を進めず、次回同一ファイルで復旧する
+        fs::write(
+            &path,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":0,"items":[]},"activeReviews":[{"repository":"o/r","prNumber":10,"round":1,"agent":"claude"}]}"#,
+        )
+        .unwrap();
+        let transient = cache.reviews_for_with_reader(&integration, Some("o/r"), |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(transient.active.is_empty());
+
+        let recovered = cache.reviews_for(&integration, Some("o/r"));
+        assert_eq!(recovered.active.len(), 1);
+        assert_eq!(recovered.active[0].pr_number, 10);
+
+        // 更新後の一時読み取り失敗では既存サマリを保持し、次回同一 mtime/サイズでも再読込して反映する
+        fs::write(
+            &path,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":0,"items":[]},"activeReviews":[{"repository":"o/r","prNumber":100,"round":2,"agent":"codex"}]}"#,
+        )
+        .unwrap();
+        let kept = cache.reviews_for_with_reader(&integration, Some("o/r"), |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(kept.active.len(), 1);
+        assert_eq!(kept.active[0].pr_number, 10);
+
+        let updated = cache.reviews_for(&integration, Some("o/r"));
+        assert_eq!(updated.active.len(), 1);
+        assert_eq!(updated.active[0].pr_number, 100);
     }
 
     #[test]
