@@ -7,10 +7,13 @@
 
 use std::fs;
 use std::io::{self, Error, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use clap::Parser;
+use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
+use crate::cli::{Cli, Commands, McpTarget};
 use crate::installer::client::AgentConfigTarget;
 use crate::installer::patcher::{
     AgentStatusReport, PatchAction, PatchResult, StatusKind, atomic_write, make_backup_path,
@@ -26,6 +29,12 @@ const STATUS_LINE_PROVIDER_KEY: &str = "status_line_provider";
 const CODEX_COMMAND: &str = "agent-statusline";
 const CODEX_ARGS: [&str; 2] = ["mcp", "codex"];
 const CODEX_COMMAND_DISPLAY: &str = "agent-statusline mcp codex";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedProvider {
+    server: String,
+    tool: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum McpServerState {
@@ -51,6 +60,7 @@ pub fn install_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<Pa
     if target.path.exists() {
         let raw_content = fs::read_to_string(&target.path)?;
         let mut doc = parse_toml_doc(&raw_content)?;
+        let previous_provider = inspect_provider(&doc);
 
         let changed = apply_codex_install(&mut doc)?;
         if !changed {
@@ -76,6 +86,7 @@ pub fn install_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<Pa
 
         let backup_path = make_backup_path(&target.path);
         fs::copy(&target.path, &backup_path)?;
+        sync_origin_provider_file(&target.path, &previous_provider)?;
         atomic_write(&target.path, updated_str.as_bytes())?;
 
         Ok(PatchResult {
@@ -103,6 +114,7 @@ pub fn install_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<Pa
         if let Some(parent) = target.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        remove_origin_provider_file(&target.path);
         atomic_write(&target.path, updated_str.as_bytes())?;
 
         Ok(PatchResult {
@@ -162,10 +174,10 @@ pub fn uninstall_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<
         });
     }
 
-    // `.bak` 上書き前に元の独自 provider を読み出しておく
+    // `.bak` 上書き前に元の独自 provider を読み出しておく（専用保存先を優先し `.bak` へフォールバック）
     let backup_path = make_backup_path(&target.path);
     let restored_provider = if has_our_provider {
-        try_restore_custom_provider(&backup_path)
+        try_restore_custom_provider(&target.path, &backup_path)
     } else {
         None
     };
@@ -202,6 +214,7 @@ pub fn uninstall_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<
 
     fs::copy(&target.path, &backup_path)?;
     atomic_write(&target.path, updated_str.as_bytes())?;
+    remove_origin_provider_file(&target.path);
 
     Ok(PatchResult {
         agent: target.agent,
@@ -406,6 +419,23 @@ fn validate_root_tables(doc: &DocumentMut) -> Result<(), String> {
 }
 
 fn apply_codex_install(doc: &mut DocumentMut) -> io::Result<bool> {
+    // 変更前に同名 MCP サーバーの競合・破損を検査し、他サービスなら設定を一切触らず拒否する
+    let existing_mcp = inspect_mcp_server(doc);
+    match &existing_mcp {
+        McpServerState::OtherCommand(desc) => {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "[{MCP_SERVERS_TABLE}.{SERVER_NAME}] is already configured for another server ({desc}); refusing to overwrite"
+                ),
+            ));
+        }
+        McpServerState::Invalid(err) => {
+            return Err(Error::new(ErrorKind::InvalidData, err.clone()));
+        }
+        McpServerState::Missing | McpServerState::Managed { .. } => {}
+    }
+
     let mut changed = false;
 
     // 1. [features] tui_extensions_statusline = true
@@ -418,27 +448,29 @@ fn apply_codex_install(doc: &mut DocumentMut) -> io::Result<bool> {
     }
 
     // 2. [mcp_servers.agent-statusline]
+    // すでに有効な管理下コマンド（絶対パスや --config 指定を含む）が設定済みなら保持し、
+    // 無効化（enabled = false）のみ修復する。
     {
         let mcp_servers = ensure_table_like_mut(doc.as_table_mut(), MCP_SERVERS_TABLE, true)?;
         let server = ensure_table_like_mut(mcp_servers, SERVER_NAME, false)?;
 
-        if server.get("command").and_then(Item::as_str) != Some(CODEX_COMMAND) {
-            set_value_preserving_decor(server, "command", Value::from(CODEX_COMMAND));
-            changed = true;
-        }
-
-        if !args_match_exact(server.get("args")) {
-            let mut arr = Array::new();
-            for arg in CODEX_ARGS {
-                arr.push(arg);
+        match existing_mcp {
+            McpServerState::Missing => {
+                set_value_preserving_decor(server, "command", Value::from(CODEX_COMMAND));
+                let mut arr = Array::new();
+                for arg in CODEX_ARGS {
+                    arr.push(arg);
+                }
+                set_value_preserving_decor(server, "args", Value::Array(arr));
+                changed = true;
             }
-            set_value_preserving_decor(server, "args", Value::Array(arr));
-            changed = true;
-        }
-
-        if server.get("enabled").and_then(Item::as_bool) == Some(false) {
-            set_value_preserving_decor(server, "enabled", Value::from(true));
-            changed = true;
+            McpServerState::Managed { enabled: false, .. } => {
+                set_value_preserving_decor(server, "enabled", Value::from(true));
+                changed = true;
+            }
+            McpServerState::Managed { enabled: true, .. }
+            | McpServerState::OtherCommand(_)
+            | McpServerState::Invalid(_) => {}
         }
     }
 
@@ -536,10 +568,23 @@ fn inspect_mcp_server(doc: &DocumentMut) -> McpServerState {
         ));
     };
 
+    let has_url = server.get("url").is_some();
+    let has_command = server.get("command").is_some();
+    if has_url && has_command {
+        return McpServerState::Invalid(format!(
+            "[{MCP_SERVERS_TABLE}.{SERVER_NAME}] cannot specify both 'url' and 'command'"
+        ));
+    }
+    if let Some(url) = server.get("url").and_then(Item::as_str) {
+        return McpServerState::OtherCommand(url.to_string());
+    }
+    if has_url {
+        return McpServerState::Invalid(format!(
+            "[{MCP_SERVERS_TABLE}.{SERVER_NAME}] 'url' must be a string"
+        ));
+    }
+
     let Some(cmd) = server.get("command").and_then(Item::as_str) else {
-        if let Some(url) = server.get("url").and_then(Item::as_str) {
-            return McpServerState::OtherCommand(url.to_string());
-        }
         return McpServerState::Invalid(format!(
             "[{MCP_SERVERS_TABLE}.{SERVER_NAME}] is missing string 'command'"
         ));
@@ -583,19 +628,20 @@ fn is_managed_codex_command(command: &str, args: Option<&[&str]>) -> bool {
     let Some(args) = args else {
         return false;
     };
-    args.len() >= CODEX_ARGS.len() && args[..CODEX_ARGS.len()] == CODEX_ARGS
+    is_valid_mcp_codex_args(args)
 }
 
-fn args_match_exact(item: Option<&Item>) -> bool {
-    let Some(arr) = item.and_then(Item::as_array) else {
-        return false;
-    };
-    if arr.len() != CODEX_ARGS.len() {
-        return false;
-    }
-    arr.iter()
-        .zip(CODEX_ARGS)
-        .all(|(val, expected)| val.as_str() == Some(expected))
+/// 実際の clap CLI 定義（`Cli::try_parse_from`）で `mcp codex` が受理する引数か厳密に検証する
+fn is_valid_mcp_codex_args(args: &[&str]) -> bool {
+    let cmdline = std::iter::once(CODEX_COMMAND).chain(args.iter().copied());
+    matches!(
+        Cli::try_parse_from(cmdline),
+        Ok(Cli {
+            command: Commands::Mcp {
+                target: McpTarget::Codex { .. }
+            }
+        })
+    )
 }
 
 fn inspect_provider(doc: &DocumentMut) -> ProviderState {
@@ -642,7 +688,53 @@ fn inspect_provider_item(item: Option<&Item>) -> ProviderState {
     ))
 }
 
-fn try_restore_custom_provider(backup_path: &Path) -> Option<(String, String)> {
+fn make_origin_provider_path(path: &Path) -> PathBuf {
+    let mut origin = path.as_os_str().to_os_string();
+    origin.push(".agent-statusline-origin.json");
+    PathBuf::from(origin)
+}
+
+fn sync_origin_provider_file(config_path: &Path, previous: &ProviderState) -> io::Result<()> {
+    match previous {
+        ProviderState::Custom { server, tool } => {
+            let origin_path = make_origin_provider_path(config_path);
+            let payload = SavedProvider {
+                server: server.clone(),
+                tool: tool.clone(),
+            };
+            let json = serde_json::to_string_pretty(&payload)
+                .map_err(|e| Error::other(e.to_string()))?
+                + "\n";
+            atomic_write(&origin_path, json.as_bytes())
+        }
+        // 修復インストール時は初回に記録した元プロバイダーを保持する
+        ProviderState::AgentStatusline => Ok(()),
+        ProviderState::DefaultOrMissing | ProviderState::Invalid(_) => {
+            remove_origin_provider_file(config_path);
+            Ok(())
+        }
+    }
+}
+
+fn remove_origin_provider_file(config_path: &Path) {
+    let origin_path = make_origin_provider_path(config_path);
+    let _ = fs::remove_file(origin_path);
+}
+
+fn load_origin_provider(config_path: &Path) -> Option<(String, String)> {
+    let origin_path = make_origin_provider_path(config_path);
+    let content = fs::read_to_string(origin_path).ok()?;
+    let saved: SavedProvider = serde_json::from_str(&content).ok()?;
+    if saved.server == SERVER_NAME && saved.tool == TOOL_NAME {
+        return None;
+    }
+    Some((saved.server, saved.tool))
+}
+
+fn try_restore_custom_provider(config_path: &Path, backup_path: &Path) -> Option<(String, String)> {
+    if let Some(origin) = load_origin_provider(config_path) {
+        return Some(origin);
+    }
     if !backup_path.exists() {
         return None;
     }
@@ -1193,5 +1285,192 @@ mod tests {
                 other => panic!("{name}: expected Incomplete, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_codex_install_refuses_to_overwrite_conflicting_http_or_foreign_server() {
+        let cases = [
+            (
+                "http-mcp-server",
+                "[mcp_servers.agent-statusline]\nurl = \"https://example.com/mcp\"\n",
+                ErrorKind::AlreadyExists,
+            ),
+            (
+                "foreign-stdio-server",
+                "[mcp_servers.agent-statusline]\ncommand = \"my-custom-mcp\"\nargs = [\"serve\"]\n",
+                ErrorKind::AlreadyExists,
+            ),
+            (
+                "mixed-url-and-command",
+                "[mcp_servers.agent-statusline]\nurl = \"https://example.com/mcp\"\ncommand = \"agent-statusline\"\nargs = [\"mcp\", \"codex\"]\n",
+                ErrorKind::InvalidData,
+            ),
+        ];
+
+        for (name, content, expected_kind) in cases {
+            let dir = TempDir::new().unwrap();
+            let target = codex_target(&dir);
+            fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+            fs::write(&target.path, content).unwrap();
+
+            let err = install_codex(&target, false).expect_err(name);
+            assert_eq!(err.kind(), expected_kind, "{name}");
+            assert_eq!(fs::read_to_string(&target.path).unwrap(), content, "{name}");
+            assert!(!make_backup_path(&target.path).exists(), "{name}");
+            assert!(!make_origin_provider_path(&target.path).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_codex_uninstall_restores_custom_provider_after_repair_install() {
+        let dir = TempDir::new().unwrap();
+        let target = codex_target(&dir);
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+
+        let original = concat!(
+            "[tui]\n",
+            "status_line_provider = { server = \"other\", tool = \"custom\" }\n",
+        );
+        fs::write(&target.path, original).unwrap();
+
+        // 1. 初回インストール（元プロバイダーを origin ファイルへ退避）
+        let first = install_codex(&target, false).unwrap();
+        assert_eq!(first.action, PatchAction::Installed);
+        assert!(make_origin_provider_path(&target.path).exists());
+
+        // 2. feature flag を false に改変し、修復インストールを実行（.bak は上書きされる）
+        let broken = fs::read_to_string(&target.path).unwrap().replace(
+            "tui_extensions_statusline = true",
+            "tui_extensions_statusline = false",
+        );
+        fs::write(&target.path, broken).unwrap();
+
+        let repaired = install_codex(&target, false).unwrap();
+        assert_eq!(repaired.action, PatchAction::Installed);
+        // .bak には修復前の agent-statusline 設定が入っていることを確認
+        let bak_content = fs::read_to_string(make_backup_path(&target.path)).unwrap();
+        assert!(bak_content.contains("server = \"agent-statusline\""));
+
+        // 3. アンインストールで元の独自プロバイダーが復元されること
+        let unres = uninstall_codex(&target, false).unwrap();
+        assert_eq!(unres.action, PatchAction::RestoredBackup);
+        let doc: DocumentMut = fs::read_to_string(&target.path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["tui"]["status_line_provider"]["server"].as_str(),
+            Some("other")
+        );
+        assert_eq!(
+            doc["tui"]["status_line_provider"]["tool"].as_str(),
+            Some("custom")
+        );
+        assert!(!make_origin_provider_path(&target.path).exists());
+    }
+
+    #[test]
+    fn test_codex_install_preserves_custom_binary_path_and_config_arg() {
+        let dir = TempDir::new().unwrap();
+        let target = codex_target(&dir);
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+
+        let full_custom = concat!(
+            "[features]\n",
+            "tui_extensions_statusline = true\n\n",
+            "[mcp_servers.agent-statusline]\n",
+            "command = \"C:\\\\bin\\\\agent-statusline.exe\"\n",
+            "args = [\"mcp\", \"codex\", \"--config\", \"C:\\\\my.toml\"]\n\n",
+            "[tui]\n",
+            "status_line_provider = { server = \"agent-statusline\", tool = \"statusline\" }\n",
+        );
+        fs::write(&target.path, full_custom).unwrap();
+
+        // 既に有効な絶対パス + --config 構成は完全冪等（AlreadyInstalled）
+        let idempotent = install_codex(&target, false).unwrap();
+        assert_eq!(idempotent.action, PatchAction::AlreadyInstalled);
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), full_custom);
+
+        // feature flag 修復（dry-run と実書き込みの両方）でも command / args を上書きしない
+        let disabled_feature = full_custom.replace(
+            "tui_extensions_statusline = true",
+            "tui_extensions_statusline = false",
+        );
+        fs::write(&target.path, &disabled_feature).unwrap();
+
+        let dry = install_codex(&target, true).unwrap();
+        assert_eq!(dry.action, PatchAction::Installed);
+        let preview = dry.preview.unwrap();
+        assert!(preview.contains("C:\\\\bin\\\\agent-statusline.exe"));
+        assert!(preview.contains("--config"));
+        assert!(preview.contains("C:\\\\my.toml"));
+
+        let repaired = install_codex(&target, false).unwrap();
+        assert_eq!(repaired.action, PatchAction::Installed);
+        let doc: DocumentMut = fs::read_to_string(&target.path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["agent-statusline"]["command"].as_str(),
+            Some("C:\\bin\\agent-statusline.exe")
+        );
+        let args: Vec<&str> = doc["mcp_servers"]["agent-statusline"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(args, vec!["mcp", "codex", "--config", "C:\\my.toml"]);
+    }
+
+    #[test]
+    fn test_codex_rejects_unsupported_mcp_codex_args() {
+        let invalid_arg_sets: &[(&str, &[&str])] = &[
+            ("unknown-flag", &["mcp", "codex", "--other-service"]),
+            ("missing-config-value", &["mcp", "codex", "--config"]),
+            ("help-flag", &["mcp", "codex", "--help"]),
+            ("extra-positional", &["mcp", "codex", "extra"]),
+            ("other-subcommand", &["render", "--agent", "claude"]),
+        ];
+
+        for (name, args) in invalid_arg_sets {
+            let dir = TempDir::new().unwrap();
+            let target = codex_target(&dir);
+            fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+            let args_toml = args
+                .iter()
+                .map(|a| format!("\"{a}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let content = format!(
+                "[features]\ntui_extensions_statusline = true\n\n[mcp_servers.agent-statusline]\ncommand = \"agent-statusline\"\nargs = [{args_toml}]\n"
+            );
+            fs::write(&target.path, &content).unwrap();
+
+            assert!(
+                matches!(diagnose_codex(&target).status, StatusKind::Incomplete(_)),
+                "{name} must not be diagnosed as Installed"
+            );
+            assert_eq!(
+                uninstall_codex(&target, false).unwrap().action,
+                PatchAction::SkippedCustom,
+                "{name} must not be removed by uninstall"
+            );
+            assert_eq!(
+                install_codex(&target, false).unwrap_err().kind(),
+                ErrorKind::AlreadyExists,
+                "{name} must fail install as conflict"
+            );
+            assert_eq!(fs::read_to_string(&target.path).unwrap(), content, "{name}");
+        }
+
+        // 有効な短縮・等号付き --config 形式は管理下として認識される
+        assert!(is_valid_mcp_codex_args(&["mcp", "codex"]));
+        assert!(is_valid_mcp_codex_args(&[
+            "mcp",
+            "codex",
+            "-c",
+            "/tmp/a.toml"
+        ]));
+        assert!(is_valid_mcp_codex_args(&[
+            "mcp",
+            "codex",
+            "--config=/tmp/a.toml"
+        ]));
     }
 }
