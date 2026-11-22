@@ -348,16 +348,51 @@ pub struct Collected {
     pub reviews: RepoReviews,
 }
 
+/// 描画に必要な外部収集項目（`collect` と Codex MCP レンダラーで共有）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectionNeeds {
+    pub git: bool,
+    pub git_query: GitQuery,
+    pub review: bool,
+}
+
+/// `config` から Git 情報・レビューサマリ収集の要否を判定する純関数
+pub fn collection_needs(config: &Config) -> CollectionNeeds {
+    let parts = used_parts(&config.format);
+    let uses = |id: &str| parts.contains(&id);
+
+    let needs_branch = uses("git_branch") && !config.git_branch.disabled;
+    let needs_dirty = uses("git_status") && !config.git_status.disabled;
+    let needs_review =
+        uses("review") && !config.review.disabled && config.integrations.squirrel_notifier.enabled;
+
+    CollectionNeeds {
+        git: needs_branch || needs_dirty || needs_review,
+        git_query: GitQuery {
+            dirty: needs_dirty,
+            remote_repo: needs_review,
+        },
+        review: needs_review,
+    }
+}
+
+/// Squirrel Notifier のサマリ JSON パスを解決する
+pub fn resolve_review_summary_path(
+    integration: &SquirrelNotifierConfig,
+) -> Option<std::path::PathBuf> {
+    integration
+        .summary_path
+        .as_deref()
+        .map(expand_env_path)
+        .or_else(default_summary_path)
+}
+
 /// Squirrel Notifier のサマリからカレントリポジトリ分のレビュー状態を読み込む
 fn load_repo_reviews(integration: &SquirrelNotifierConfig, repo: Option<&str>) -> RepoReviews {
     let Some(repo) = repo else {
         return RepoReviews::default();
     };
-    let path = integration
-        .summary_path
-        .as_deref()
-        .map(expand_env_path)
-        .or_else(default_summary_path);
+    let path = resolve_review_summary_path(integration);
     let Some(summary) = path.as_deref().and_then(load_summary) else {
         return RepoReviews::default();
     };
@@ -370,25 +405,13 @@ fn load_repo_reviews(integration: &SquirrelNotifierConfig, repo: Option<&str>) -
 
 /// 副作用のある入力（Git のリポジトリ読み取り、サマリ JSON の読み込み）を集める
 pub fn collect(config: &Config, state: &StatuslineState) -> Collected {
-    let parts = used_parts(&config.format);
-    let uses = |id: &str| parts.contains(&id);
+    let needs = collection_needs(config);
 
-    let needs_branch = uses("git_branch") && !config.git_branch.disabled;
-    let needs_dirty = uses("git_status") && !config.git_status.disabled;
-    let needs_review =
-        uses("review") && !config.review.disabled && config.integrations.squirrel_notifier.enabled;
+    let git = needs
+        .git
+        .then(|| get_git_status(&state.cwd, needs.git_query));
 
-    let git = (needs_branch || needs_dirty || needs_review).then(|| {
-        get_git_status(
-            &state.cwd,
-            GitQuery {
-                dirty: needs_dirty,
-                remote_repo: needs_review,
-            },
-        )
-    });
-
-    let reviews = if needs_review {
+    let reviews = if needs.review {
         load_repo_reviews(
             &config.integrations.squirrel_notifier,
             git.as_ref().and_then(|g| g.remote_repo.as_deref()),

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   エントリポイント・CLI層（コードビハインド）の行数が上限を超えていないか検証する（#9）。
 .DESCRIPTION
@@ -23,10 +23,12 @@ $ErrorActionPreference = "Stop"
 # 値の更新は「抽出して減った」「意図して増やす」のいずれかを PR で説明できるときだけ行う。
 $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力。
-    # 301: 設定 TUI の `mod editor;`、302: `mod preview;`、304: `mod tui;` と `config` サブコマンドのディスパッチ 1 行（ロジックは tui/ に置く）
-    "src/main.rs" = 304
-    # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）、125: `config --no-mouse`（4 行。マウスを使わない手段 #79）
-    "src/cli.rs"  = 125
+    # 301: 設定 TUI の `mod editor;`、302: `mod preview;`、304: `mod tui;` と `config` サブコマンドのディスパッチ 1 行（ロジックは tui/ に置く）、
+    # 308: Codex MCP サーバーの `mod mcp;` と `mcp codex` ディスパッチ 3 行（ロジックは mcp/ に置く #136）
+    "src/main.rs" = 308
+    # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）、125: `config --no-mouse`（4 行 #79）、
+    # 141: `mcp codex` サブコマンドと `McpTarget` 引数定義（16 行 #136）
+    "src/cli.rs"  = 141
 }
 
 $violations = New-Object System.Collections.Generic.List[string]

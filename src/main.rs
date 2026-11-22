@@ -3,6 +3,7 @@ mod cli;
 mod editor;
 mod engine;
 mod installer;
+mod mcp;
 mod model;
 mod modules;
 mod preview;
@@ -13,7 +14,7 @@ mod updater;
 use std::io::{self, Read};
 
 use clap::Parser;
-use cli::{AgentKind, Cli, Commands};
+use cli::{AgentKind, Cli, Commands, McpTarget};
 
 use adapter::StatuslineAdapter;
 use adapter::agy::AntigravityAdapter;
@@ -39,6 +40,9 @@ fn main() -> io::Result<()> {
             config,
             bench,
         } => cmd_render(agent, config.as_deref(), bench),
+        Commands::Mcp {
+            target: McpTarget::Codex { config },
+        } => mcp::run_codex_stdio(config.as_deref()),
         Commands::Config { config, no_mouse } => tui::run(config.as_deref(), !no_mouse),
         Commands::Install {
             agent,
