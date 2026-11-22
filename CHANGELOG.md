@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-22
+
 ### Added
 
 - `install` / `uninstall` / `status` コマンドで Codex CLI（`$CODEX_HOME/config.toml`、既定 `~/.codex/config.toml`）に対応（`--all` 含む）。コメント保持の TOML 部分更新、`[features] tui_extensions_statusline = true` / `[mcp_servers.agent-statusline]` / `[tui] status_line_provider` の自動設定・整合診断・`.bak` バックアップからの独自プロバイダー復元をサポート (#136)。
@@ -165,4 +167,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero-downtime self-update design (`agent-statusline update` and background release check).
 - Task management and tracking document (`tasks.md`).
 
-[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...v0.6.0
