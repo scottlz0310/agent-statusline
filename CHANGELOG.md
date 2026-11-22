@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Codex CLI の Custom status line（`com.openai/codex-statusline-state`）を内部状態へ変換する `CodexAdapter` と、スタイル中間表現（`StyledSpan`）から Codex `UiTree` JSON を生成する変換基盤を追加 (#136)。
 - `.cargo/config.toml`: `registry.global-min-publish-age = "3 days"` を追加（Rust 1.100 以降で有効）。公開から 3 日未満のクレートを新規に解決しない。lock file maintenance は Renovate の minimumReleaseAge を迂回するため、無人の自動マージに対する防御として cargo 側で止める
 
 ### Changed

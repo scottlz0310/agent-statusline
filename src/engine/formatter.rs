@@ -3,7 +3,7 @@ use crate::engine::config::{
     ModelConfig, PlanConfig, QuotaConfig, ReviewConfig, SandboxConfig, SquirrelNotifierConfig,
 };
 use crate::engine::parts::{PartInput, find, part_ids};
-use crate::engine::style::{pct_style_name, render_styled_text};
+use crate::engine::style::{StyledSpan, parse_styled_spans, pct_style_name, render_styled_spans};
 use crate::engine::template::{Token, expand, tokenize};
 use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
 use crate::model::state::StatuslineState;
@@ -289,14 +289,15 @@ fn used_parts(format: &str) -> Vec<&str> {
         .collect()
 }
 
-/// 収集済みの入力だけからステータスラインを合成する純関数。Git・ファイル・環境変数には触れない
-pub fn compose(
+/// 収集済みの入力だけから行ごとのスタイル付きスパン列を合成する純関数。
+/// Git・ファイル・環境変数には触れない。ANSI 出力と Codex `UiTree` 出力の共通基盤。
+pub fn compose_lines(
     config: &Config,
     state: &StatuslineState,
     git: Option<&GitStatus>,
     reviews: &RepoReviews,
     terminal_width: usize,
-) -> String {
+) -> Vec<Vec<StyledSpan>> {
     let input = PartInput {
         state,
         git,
@@ -319,11 +320,26 @@ pub fn compose(
         let filled = expand(line, &vars);
         let trimmed = filled.trim_end();
         if !trimmed.is_empty() {
-            output_lines.push(render_styled_text(trimmed));
+            output_lines.push(parse_styled_spans(trimmed));
         }
     }
 
-    output_lines.join("\n")
+    output_lines
+}
+
+/// 収集済みの入力だけからステータスラインを合成する純関数。Git・ファイル・環境変数には触れない
+pub fn compose(
+    config: &Config,
+    state: &StatuslineState,
+    git: Option<&GitStatus>,
+    reviews: &RepoReviews,
+    terminal_width: usize,
+) -> String {
+    compose_lines(config, state, git, reviews, terminal_width)
+        .iter()
+        .map(|line| render_styled_spans(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Git 状態とレビュー状態を、`format` が使う部品に必要な分だけ収集する
@@ -407,6 +423,7 @@ pub fn render_default(state: &StatuslineState, terminal_width: usize) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::style::render_styled_text;
     use crate::model::state::QuotaItem;
     use std::path::PathBuf;
 

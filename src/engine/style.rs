@@ -104,9 +104,33 @@ fn unescape_brackets(s: &str) -> String {
     s.replace(r"\[", "[").replace(r"\]", "]")
 }
 
-/// インラインスタイル構文 `[text](style)` を ANSI 装飾付き文字列に変換する
-pub fn render_styled_text(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+/// インラインスタイル構文 `[text](style)` を分解した中間表現の 1 スパン
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledSpan {
+    pub text: String,
+    pub codes: Vec<u8>,
+}
+
+fn push_span(spans: &mut Vec<StyledSpan>, text: &str, codes: Vec<u8>) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.codes == codes
+    {
+        last.text.push_str(text);
+    } else {
+        spans.push(StyledSpan {
+            text: text.to_string(),
+            codes,
+        });
+    }
+}
+
+/// インラインスタイル構文 `[text](style)` をスタイル付きスパン列へ解析する
+pub fn parse_styled_spans(input: &str) -> Vec<StyledSpan> {
+    let mut spans = Vec::new();
+    let mut plain = String::new();
     let mut chars = input.char_indices().peekable();
 
     while let Some((i, c)) = chars.next() {
@@ -114,11 +138,11 @@ pub fn render_styled_text(input: &str) -> String {
             if let Some(&(_, next_c)) = chars.peek()
                 && (next_c == '[' || next_c == ']' || next_c == '\\')
             {
-                result.push(next_c);
+                plain.push(next_c);
                 chars.next();
                 continue;
             }
-            result.push(c);
+            plain.push(c);
             continue;
         }
 
@@ -135,11 +159,13 @@ pub fn render_styled_text(input: &str) -> String {
                 let codes = parse_style_tokens(style_spec);
                 let unescaped_text = unescape_brackets(text);
                 if codes.is_empty() {
-                    result.push_str(&unescaped_text);
+                    plain.push_str(&unescaped_text);
                 } else {
-                    result.push_str(&style_to_ansi(&codes));
-                    result.push_str(&unescaped_text);
-                    result.push_str(RESET);
+                    if !plain.is_empty() {
+                        push_span(&mut spans, &plain, Vec::new());
+                        plain.clear();
+                    }
+                    push_span(&mut spans, &unescaped_text, codes);
                 }
 
                 // chars を end 以降に進める
@@ -154,10 +180,34 @@ pub fn render_styled_text(input: &str) -> String {
             }
         }
 
-        result.push(c);
+        plain.push(c);
     }
 
+    if !plain.is_empty() {
+        push_span(&mut spans, &plain, Vec::new());
+    }
+
+    spans
+}
+
+/// スタイル付きスパン列を ANSI 装飾付き文字列へ変換する
+pub fn render_styled_spans(spans: &[StyledSpan]) -> String {
+    let mut result = String::new();
+    for span in spans {
+        if span.codes.is_empty() {
+            result.push_str(&span.text);
+        } else {
+            result.push_str(&style_to_ansi(&span.codes));
+            result.push_str(&span.text);
+            result.push_str(RESET);
+        }
+    }
     result
+}
+
+/// インラインスタイル構文 `[text](style)` を ANSI 装飾付き文字列に変換する
+pub fn render_styled_text(input: &str) -> String {
+    render_styled_spans(&parse_styled_spans(input))
 }
 
 #[cfg(test)]
@@ -225,5 +275,27 @@ mod tests {
 
         let styled_bracketed = render_styled_text(r"[\[bracketed\]](dimmed)");
         assert_eq!(styled_bracketed, "\x1b[2m[bracketed]\x1b[0m");
+    }
+
+    #[test]
+    fn test_parse_styled_spans_merges_adjacent_and_preserves_escapes() {
+        let spans = parse_styled_spans(r"a [b](bold cyan)[c](bold cyan) [d](unknown) \[e\]");
+        assert_eq!(
+            spans,
+            vec![
+                StyledSpan {
+                    text: "a ".to_string(),
+                    codes: vec![],
+                },
+                StyledSpan {
+                    text: "bc".to_string(),
+                    codes: vec![1, 36],
+                },
+                StyledSpan {
+                    text: " d [e]".to_string(),
+                    codes: vec![],
+                },
+            ]
+        );
     }
 }
