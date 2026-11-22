@@ -1,6 +1,6 @@
 # agent-statusline
 
-Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステータスライン CLI。
+Antigravity CLI、Claude Code、GitHub Copilot CLI、Codex CLI 向けの Rust 製ステータスライン CLI。
 
 ---
 
@@ -9,16 +9,16 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI 向けの Rust 製ステー�
 - ⚡ **外部 CLI に依存しない描画**:
   - Git 状態・JSON・時刻の処理に `git`、`jq`、`date` などの外部 CLI を使わず、Rust のライブラリで処理。ただし Windows では、システムの Git 設定ファイルの場所を調べるために、24 時間に 1 回だけ `git` を起動する。
   - `render --bench` で実行環境ごとの描画時間を計測可能。Git リポジトリ内での既定レイアウトの実測（中央値）は、Linux で約 2ms、Windows で約 11〜16ms（計測条件は [#35](https://github.com/scottlz0310/agent-statusline/issues/35)）。
-- 🤝 **3 大 AI CLI クライアント対応**:
+- 🤝 **4 大 AI CLI クライアント対応**:
   - **Antigravity CLI (`agy`)**
   - **Claude Code (`claude`)**
   - **GitHub Copilot CLI (`copilot`)**
-  - **Codex CLI は未対応**です。Codex CLI には組み込みステータスラインがありますが、外部レンダラーを呼び出す公式フックがないため、`agent-statusline` を接続できません。要望は [openai/codex#17827](https://github.com/openai/codex/issues/17827) で追跡されています。
+  - **Codex CLI (`codex`)**: Codex CLI `0.171.0` 以降の実験機能 Custom status line（stdio MCP provider + 構造化 `UiTree` JSON、[openai/codex#17827](https://github.com/openai/codex/issues/17827)）に対応。常駐 stdio MCP サーバー（`agent-statusline mcp codex`）として動作する。
 - 🛠️ **設定自動化 (`install` / `uninstall` / `status`)**:
-  - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` 等）への statusline コマンド登録・解除をワンコマンドで自動実行。
+  - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` / Codex の `$CODEX_HOME/config.toml`）への statusline 登録・解除・整合診断をワンコマンドで自動実行。
 - 🐿️ **Squirrel Notifier 連携**:
-  - 各クライアントのレートリミット状態（5時間枠・週次枠・クォータ残量）を共通スキーマ（`schemaVersion: 1`）に集約し、ローカルへ原子的（Atomic rename）に出力。
-  - Squirrel Notifier が出力するレビュー・キュー状態のサマリから、カレントリポジトリの PR のうちレビュー実行中（🔍）と reviewer 起動待ち（⏳）のものを `$review` に表示（例: `🐿 🔍#31 r2 ⏳#32 r1`）。Squirrel Notifier が起動していない場合やリポジトリ外では何も表示しない。
+  - Antigravity CLI / Claude Code / GitHub Copilot CLI のレートリミット状態（5時間枠・週次枠・クォータ残量）を共通スキーマ（`schemaVersion: 1`）に集約し、ローカルへ原子的（Atomic rename）に出力（Codex CLI は Squirrel Notifier が `codex app-server` から直接取得するため statusline 側からの書き出しは行わない）。
+  - Squirrel Notifier が出力するレビュー・キュー状態のサマリから、カレントリポジトリの PR のうちレビュー実行中（🔍）と reviewer 起動待ち（⏳）のものを `$review` に表示（例: `🐿 🔍#31 r2 ⏳#32 r1`、Codex CLI を含む全クライアント共通）。Squirrel Notifier が起動していない場合やリポジトリ外では何も表示しない。
 - 🔄 **自動更新 (`agent-statusline update`)**:
   - GitHub Release から更新し、バイナリを置き換える。描画時の更新確認は 24 時間ごとにバックグラウンドで行う。
 - 🎨 **Starship ライクな TOML 設定**:
@@ -82,23 +82,28 @@ grep -n 'agent-statusline/env\|\.local/bin' ~/.profile ~/.bash_profile ~/.bashrc
 ### クライアント設定の自動登録
 
 ```bash
-# 全クライアントに一括登録
+# 全クライアント（agy, claude, copilot, codex）に一括登録
 agent-statusline install --all
 
 # 特定クライアントのみ登録
 agent-statusline install --agent agy,claude
+agent-statusline install --agent codex
 
 # 設定状態の診断
 agent-statusline status
 ```
 
+Codex CLI（`0.171.0` 以降）への登録では、`$CODEX_HOME/config.toml`（未設定時は `~/.codex/config.toml`）のコメントや既存設定を保持したまま、`[features] tui_extensions_statusline = true`、`[mcp_servers.agent-statusline]`、`[tui] status_line_provider` の 3 箇所を設定します。同名の別 MCP サーバーが既に登録されている場合は上書きせずエラーで保護します。
+
 ## アンインストール
 
-最初に、対応クライアントの設定から statusline 登録を解除します。以前の独自 statusline 設定がバックアップされている場合は復元されます。
+最初に、対応クライアントの設定から statusline 登録を解除します。以前の独自 statusline 設定（Codex の独自 `status_line_provider` を含む）が退避されている場合は復元されます。
 
 ```bash
 agent-statusline uninstall --all
 ```
+
+Codex CLI では、`install` 時に退避した元の独自プロバイダー情報（`config.toml.agent-statusline-origin.json`）がアンインストール完了後に自動削除されます。ロールバック用の `.bak` ファイルは確認後に必要に応じて削除してください。
 
 このコマンドはクライアント設定を変更しますが、バイナリは削除しません。バイナリはインストール方法に応じて削除してください。
 
@@ -156,14 +161,17 @@ cargo uninstall agent-statusline
 ### ステータスラインの実行 (エージェントから自動呼出)
 
 ```bash
-# Antigravity CLI
+# Antigravity CLI（ワンショット CLI）
 agent-statusline render --agent agy
 
-# Claude Code
+# Claude Code（ワンショット CLI）
 agent-statusline render --agent claude
 
-# GitHub Copilot CLI
+# GitHub Copilot CLI（ワンショット CLI）
 agent-statusline render --agent copilot
+
+# Codex CLI（常駐 stdio MCP サーバー）
+agent-statusline mcp codex
 ```
 
 ---
@@ -200,6 +208,16 @@ agent-statusline config --no-mouse
 - **Windows では、絵文字（BMP 外の文字）を、キー入力・貼り付けで入力できません。** 依存する端末ライブラリ crossterm の既知の不具合（[#1072](https://github.com/crossterm-rs/crossterm/issues/1072)、[#848](https://github.com/crossterm-rs/crossterm/issues/848)）によるものです。記号は、候補の一覧から選んでください（`★` など BMP 内の文字は入力できます）。
 - プレビューは、この画面を動かしている端末での表示です。エージェント CLI がステータスラインを表示する領域（幅、フォント、折り返し）とは、異なることがあります。
 - TOML の直接編集は未対応です。
+
+---
+
+## Codex CLI 利用時の制限・注意点
+
+- **Codex CLI `0.171.0` 以降が必要（実験機能依存）**: `tui_extensions_statusline` は Codex 側の Experimental 機能（`/experimental` の Custom status line）に依存しています。上流のスキーマやフラグ仕様が変更された場合は追従が必要になることがあります。
+- **ユーザー設定必須**: Codex CLI はプロジェクト層の `mcp_servers` 定義をステータスラインプロバイダーとして拒否するため、必ずユーザー設定（`$CODEX_HOME/config.toml`、既定 `~/.codex/config.toml`）へ登録してください（`agent-statusline install --agent codex` が自動設定します）。
+- **端末幅の未提供**: Codex のスナップショットには端末幅が含まれないため、`[directory] max_length = 0`（自動）時は 120 列相当を基準にパスを省略します。固定長にしたい場合は `[directory] max_length` で文字数を指定してください。
+- **一部スタイルの制約**: Codex `UiTree` に直接対応しない `dimmed`・`gray`・`grey` は `#808080` に近似し、`bg:*`（背景色）と `inverted` は無視されます。フッター高さの上限により、3 行を超える行は末尾 `…` でクリップされます。
+- **Windows 常駐中の `agent-statusline update`**: Windows で Codex CLI が常駐 MCP サーバーとして `agent-statusline.exe` を起動している間に `agent-statusline update` を実行した場合、バイナリの置換自体は完了しますが、稼働中のプロセスは旧バージョンのまま動作し続けます。新バージョンを反映するには Codex CLI を再起動（または MCP 再接続）してください。
 
 ---
 

@@ -6,7 +6,7 @@
 * **解決策**:  
   * 全処理（標準入力 JSON パース、Git 状態検出、時刻・クォータ計算、ローカル連携ファイル出力、ANSI 文字列生成）を **単一の Rust ネイティブバイナリ** に集約。  
   * 描画処理で `git` などの外部 CLI を起動せず、起動コストを抑える。実行時間は環境に依存するため、`render --bench` で計測する。
-  * **3 大主要 CLI クライアント（Antigravity CLI, Claude Code, GitHub Copilot CLI）** を第一級市民として標準サポート。  
+  * **4 大主要 CLI クライアント（Antigravity CLI, Claude Code, GitHub Copilot CLI, Codex CLI）** を第一級市民として標準サポート。
   * `Mcp-Docker` の設計モデルを踏襲した **クライアント設定自動インストーラー（`install` / `uninstall` / `status`）** を備え、ユーザー環境への安全な導入を自動化する。  
 * Windows / Linux 向け ZIP と checksum を使い、複数マシンへの配布・更新を自動化する。
   * Starship ライクな TOML 設定とエージェント抽象化レイヤーを導入し、パワーユーザー向けの拡張性を確保する。
@@ -18,12 +18,12 @@
 1. **描画経路で外部 CLI を起動しない**:
    * Git 操作は `gix`、時刻計算は `chrono`、JSON 操作は `serde_json` で行う。24 時間ごとのバックグラウンド更新確認では同じ実行ファイルを起動する（6.3 節）。
    * 例外として Windows では、gix がシステムの gitconfig の場所を調べるために `git` を起動する（1 回約 40ms）。求めたパスは OS のキャッシュディレクトリの `agent-statusline/git_system_config.json` に保存し、24 時間再利用する。保存できない場合は描画のたびに `git` が起動するため、保存先とエラー内容を標準エラー出力に警告する。同じ理由で `git` が起動するため、Windows ではシステムの gitattributes を読み込まない（Git for Windows 既定の内容は diff ドライバの指定だけで、変更状態の判定に影響しない）。
-2. **3 大クライアントの統合サポート**:  
-   * Antigravity CLI (`agy`)、Claude Code (`claude`)、GitHub Copilot CLI (`copilot`) の入力 JSON スキーマの違いを `Adapter` 層で吸収し、単一バイナリでシームレスに処理。
+2. **4 大クライアントの統合サポート**:
+   * Antigravity CLI (`agy`)、Claude Code (`claude`)、GitHub Copilot CLI (`copilot`) のワンショット stdin JSON と、Codex CLI (`codex`) の常駐 stdio MCP スナップショット（`com.openai/codex-statusline-state`）の違いを `Adapter` 層とスタイル中間表現（`StyledSpan`）で吸収し、単一バイナリでシームレスに処理。
 3. **Mcp-Docker 方式の安全なクライアント設定自動化**:  
-   * 各エージェントの設定ファイル（`settings.json` / `config.json` 等）のパスを自動解決し、既存設定やコメントを破壊せずに statusline 登録・解除・診断を行う。
+   * 各エージェントの設定ファイル（`settings.json` / Codex の `$CODEX_HOME/config.toml`）のパスを自動解決し、既存設定やコメントを破壊せずに statusline 登録・解除・診断を行う。
 4. **複数 OS のネイティブ実行**:
-   * Windows、Linux 向けのネイティブバイナリを配布する。シェル固有のプロンプト幅制御は実装せず、端末向け ANSI 出力を行う。
+   * Windows、Linux 向けのネイティブバイナリを配布する。ワンショットクライアント向けには端末向け ANSI 出力を行い、Codex CLI 向けには構造化 `UiTree` JSON を出力する。
 5. **Starship ライクなメンタルモデル**:  
    * TOML による宣言的レイアウト設定（`format = "$directory$git_branch..."`）とインラインスタイル指定記法（`[text](style)`）を採用し、既存ツールからの学習コストを最小化。  
 6. **ゼロコンフィグで動作**:  
@@ -41,11 +41,15 @@
 src/
 ├── main.rs
 ├── cli.rs
-├── adapter/       # agy、claude、copilot の入力変換
+├── adapter/       # agy、claude、copilot、codex の入力変換
 ├── model/         # 共通状態と Squirrel Notifier スキーマ
-├── modules/       # context、directory、git、quota、review
-├── engine/        # TOML 設定、テンプレート、ANSI スタイル
-├── installer/     # クライアント設定の install / uninstall / status
+├── modules/       # context、directory、git、quota、review、terminal
+├── engine/        # TOML 設定、テンプレート、スタイル IR（ANSI / Codex UiTree）
+├── mcp/           # Codex CLI 向け常駐 stdio MCP サーバーと非ブロッキングキャッシュ
+├── editor/        # 設定 TUI 用の厳密読み込み・部分更新・履歴・保存
+├── preview/       # プレビュー基盤（シナリオ・表示幅・折り返し）
+├── tui/           # 対話的設定エディタ (`agent-statusline config`)
+├── installer/     # クライアント設定の install / uninstall / status（JSONC / Codex TOML）
 ├── sink/          # Squirrel Notifier JSON の原子的書き出し
 └── updater/       # GitHub Release 確認とバイナリ更新
 ```
@@ -68,11 +72,33 @@ src/
   │      └─ OS のローカルデータディレクトリ/SquirrelNotifier/ratelimit-status/<agentId>.json (`claude` は `claude-code`、他は `--agent` と同じ)
   │         (一時ファイル書き出し + 原子的 rename)
   ├─ 6. Format Engine
-  │      └─ Starship 風テンプレートに変数をバインドし、ANSI 装飾を付与
+  │      └─ Starship 風テンプレートに変数をバインドし、`StyledSpan` IR 経由で ANSI 装飾を付与
   └─ 7. stdout へ出力
 ```
 
 更新確認の期限を過ぎている場合、描画処理は同じ実行ファイルの `update --background` を起動して確認を委譲します。通常の描画時間は `render --bench` で利用環境ごとに測定します。
+
+### 3.3 処理シーケンス (`mcp codex` コマンド実行時)
+
+Codex CLI（`0.171.0` 以降）の Custom status line は常駐 stdio MCP サーバーとして動作し、成功後約 1 秒間隔で `resources/read` が呼ばれます。1 回でも 1 秒タイムアウトを超過すると Codex 側のポーリングが停止するため、以下のキャッシュと非ブロッキング構成を採用しています。
+
+```text
+[Codex CLI (>= 0.171.0)]
+       │ (改行区切り JSON-RPC 2.0 over stdio)
+       ▼
+[agent-statusline mcp codex]
+  ├─ 起動時: 24 時間バックグラウンド更新チェックを 1 回起動
+  ├─ initialize / ping / tools/list / tools/call / resources/list / resources/templates/list
+  │    └─ `_meta["openai/ui"].entrypoints = [{ type: "statusline", resourceUri: "ui://agent-statusline/footer" }]` を広告
+  └─ resources/read (`params._meta["com.openai/codex-statusline-state"]`)
+       ├─ 1. `ConfigCache`（mtime・サイズ監視、一時読み取り失敗時は直前キャッシュを保持し次回再読込）
+       ├─ 2. `CodexAdapter::parse_value()` で `StatuslineState` へ変換（`RatelimitPayload` は `None`）
+       ├─ 3. `GitStatusCache`（バックグラウンドワーカー + TTL 3 秒、キャッシュミス時は最大 80ms のみ待機）
+       ├─ 4. `ReviewSummaryCache`（mtime・サイズ監視、一時読み取り失敗時は直前サマリを保持）
+       ├─ 5. `formatter::compose_lines()`（基準幅 120 列）→ `engine::ui_tree` で `UiTree` JSON 化
+       │      └─ 64 KiB JSON / 16 KiB リーフ / 256 ノード / 深さ 16 の上限ガード付き
+       └─ 6. `mimeType: "application/json"` の単一テキストリソースとして stdout へ返却
+```
 
 ---
 
@@ -80,27 +106,29 @@ src/
 
 ### 4.1 対象クライアントと設定パス
 
-| クライアント名 | 対象設定ファイル | statusLine 登録設定 |
+| クライアント名 | 対象設定ファイル | 登録内容 |
 | :--- | :--- | :--- |
 | **`agy`** | `~/.gemini/antigravity-cli/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent agy", "enabled": true }` |
 | **`claude`** | `~/.claude/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent claude" }` |
-| **`copilot`** | `~/.copilot/settings.json` | `"statusLine": { "type": "command", "command": "agent-statusline render --agent copilot" }` |
+| **`copilot`** | `$COPILOT_HOME/settings.json`（既定 `~/.copilot/settings.json`） | `"statusLine": { "type": "command", "command": "agent-statusline render --agent copilot" }` および `"footer": { "showCustom": true }` |
+| **`codex`** | `$CODEX_HOME/config.toml`（既定 `~/.codex/config.toml`） | `[features] tui_extensions_statusline = true`、`[mcp_servers.agent-statusline]`（`command = "agent-statusline"`, `args = ["mcp", "codex"]`）、`[tui] status_line_provider = { server = "agent-statusline", tool = "statusline" }` |
 
 ### 4.2 インストーラーコマンド体系
 
 `Mcp-Docker` の設計モデルに準拠：
 
 ```bash
-# 全クライアントに一括登録
+# 全クライアント（agy, claude, copilot, codex）に一括登録
 agent-statusline install --all
 
 # 特定クライアントのみ登録
 agent-statusline install --agent agy,claude
+agent-statusline install --agent codex
 
-# 登録解除
-agent-statusline uninstall --agent agy
+# 登録解除（独自設定が退避されていれば復元）
+agent-statusline uninstall --agent codex
 
-# 現在の登録状態とバイナリ整合性を診断
+# 現在の登録状態と整合性（Codex の 3 設定項目を含む）を診断
 agent-statusline status
 ```
 
@@ -224,7 +252,7 @@ GitHub Release からバイナリを取得し、インストール済みバイ�
 1. **実行中バイナリの安全な置換 (Windows 対応)**:
    - Windows では実行中の `.exe` ファイルは直接上書き・削除できませんが、**リネーム（移動）は許可**されています。
    - `update` 実行時、現在のバイナリ（`agent-statusline.exe`）を一時ファイル（`agent-statusline.exe.old`）にリネームした上で、GitHub Releases からダウンロードした最新バイナリを `agent-statusline.exe` として配置します。
-   - 現在のプロセスは無停止で終了し、**次回エージェントが statusline を呼び出した瞬間から新バージョンが即座に起動**します（`.old` は次回起動時に自動クリーンアップ）。
+   - 現在のプロセスは無停止で終了し、**次回エージェントが statusline を呼び出した瞬間から新バージョンが即座に起動**します（`.old` は次回起動時に自動クリーンアップ）。なお Codex CLI の常駐 MCP サーバーとして稼働中に更新した場合、稼働中のプロセスは旧バイナリのまま動作を継続するため、新バージョンの反映には Codex CLI の再起動（または MCP 再接続）が必要です。
 2. **24時間ごとのバックグラウンドチェック**:
    - `render` 実行時は OS の cache directory 内にある `agent-statusline/update_check.json` のタイムスタンプを確認します。
    - 24 時間以上経過している場合のみ、バックグラウンドで非同期プロセスをスポーンして GitHub Releases API に最新タグを問い合わせます。
