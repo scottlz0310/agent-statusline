@@ -405,14 +405,29 @@ mod tests {
 
         // 作成直後の一時読み取り失敗（共有違反など）では stamp を進めず、次回同一ファイルで復旧する
         fs::write(&path, "[model]\nsymbol = \"M1 \"\n").unwrap();
-        cache.refresh_with_reader(|_| Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        let stamp_v1 = FileStamp::of(&path).unwrap();
+        let mut create_read_called = false;
+        cache.refresh_with_reader(|_| {
+            create_read_called = true;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(create_read_called);
         assert_eq!(cache.config.model.symbol, "🤖 ");
+        assert_eq!(FileStamp::of(&path).unwrap(), stamp_v1);
         assert_eq!(cache.get().model.symbol, "M1 ");
 
         // 更新後の一時読み取り失敗では既存設定を保持し、次回同一 mtime/サイズでも再読込して反映する
         fs::write(&path, "[model]\nsymbol = \"MODEL-2 \"\n").unwrap();
-        cache.refresh_with_reader(|_| Err(io::Error::from(io::ErrorKind::PermissionDenied)));
+        let stamp_v2 = FileStamp::of(&path).unwrap();
+        assert_ne!(stamp_v1.len, stamp_v2.len);
+        let mut update_read_called = false;
+        cache.refresh_with_reader(|_| {
+            update_read_called = true;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert!(update_read_called);
         assert_eq!(cache.config.model.symbol, "M1 ");
+        assert_eq!(FileStamp::of(&path).unwrap(), stamp_v2);
         assert_eq!(cache.get().model.symbol, "MODEL-2 ");
     }
 
@@ -471,10 +486,15 @@ mod tests {
             r#"{"schemaVersion":1,"queue":{"totalWaiting":0,"items":[]},"activeReviews":[{"repository":"o/r","prNumber":10,"round":1,"agent":"claude"}]}"#,
         )
         .unwrap();
+        let stamp_v1 = FileStamp::of(&path).unwrap();
+        let mut create_read_called = false;
         let transient = cache.reviews_for_with_reader(&integration, Some("o/r"), |_| {
+            create_read_called = true;
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         });
+        assert!(create_read_called);
         assert!(transient.active.is_empty());
+        assert_eq!(FileStamp::of(&path).unwrap(), stamp_v1);
 
         let recovered = cache.reviews_for(&integration, Some("o/r"));
         assert_eq!(recovered.active.len(), 1);
@@ -483,18 +503,24 @@ mod tests {
         // 更新後の一時読み取り失敗では既存サマリを保持し、次回同一 mtime/サイズでも再読込して反映する
         fs::write(
             &path,
-            r#"{"schemaVersion":1,"queue":{"totalWaiting":0,"items":[]},"activeReviews":[{"repository":"o/r","prNumber":100,"round":2,"agent":"codex"}]}"#,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":0,"items":[]},"activeReviews":[{"repository":"o/r","prNumber":1000,"round":2,"agent":"codex-cli"}]}"#,
         )
         .unwrap();
+        let stamp_v2 = FileStamp::of(&path).unwrap();
+        assert_ne!(stamp_v1.len, stamp_v2.len);
+        let mut update_read_called = false;
         let kept = cache.reviews_for_with_reader(&integration, Some("o/r"), |_| {
+            update_read_called = true;
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         });
+        assert!(update_read_called);
         assert_eq!(kept.active.len(), 1);
         assert_eq!(kept.active[0].pr_number, 10);
+        assert_eq!(FileStamp::of(&path).unwrap(), stamp_v2);
 
         let updated = cache.reviews_for(&integration, Some("o/r"));
         assert_eq!(updated.active.len(), 1);
-        assert_eq!(updated.active[0].pr_number, 100);
+        assert_eq!(updated.active[0].pr_number, 1000);
     }
 
     #[test]
