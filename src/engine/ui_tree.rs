@@ -1,9 +1,6 @@
 //! Codex CLI の Custom status line (`UiTree` JSON) 変換モジュール。
 //!
 //! 契約根拠: `openai/codex` `rust-v0.171.0` の `codex-rs/tui/src/ui_tree.rs` / `decode.rs`。
-//! Phase 2 で `agent-statusline mcp codex` サブコマンドから接続するまで、
-//! 非テストビルドでは未使用となる。
-#![allow(dead_code)]
 
 use serde::Serialize;
 
@@ -22,6 +19,7 @@ pub const CODEX_DEFAULT_TERMINAL_WIDTH: usize = 120;
 pub const MAX_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_NODES: usize = 256;
+#[cfg(test)]
 pub const MAX_DEPTH: usize = 16;
 
 /// `dimmed` および `gray`/`grey` の近似色（Phase 0 実機検証で合意）

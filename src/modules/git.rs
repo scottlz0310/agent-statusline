@@ -14,7 +14,7 @@ pub struct GitStatus {
 }
 
 /// 描画に必要な項目だけを取得するための指定
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GitQuery {
     pub dirty: bool,
     pub remote_repo: bool,

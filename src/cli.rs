@@ -29,6 +29,12 @@ pub enum Commands {
         bench: bool,
     },
 
+    /// Run stdio MCP statusline provider server
+    Mcp {
+        #[command(subcommand)]
+        target: McpTarget,
+    },
+
     /// Edit the statusline configuration interactively, with a live preview
     Config {
         /// Path to custom config file
@@ -86,6 +92,16 @@ pub enum Commands {
         /// Background check mode (quietly update cache only)
         #[arg(long, hide = true)]
         background: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpTarget {
+    /// Run Codex CLI Custom status line MCP server over stdio
+    Codex {
+        /// Path to custom config file
+        #[arg(short, long)]
+        config: Option<std::path::PathBuf>,
     },
 }
 

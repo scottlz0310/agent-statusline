@@ -1,8 +1,4 @@
 //! Codex CLI (`com.openai/codex-statusline-state`) 向けスナップショット変換アダプタ。
-//!
-//! Phase 2 で `agent-statusline mcp codex` サブコマンドから接続するまで、
-//! 非テストビルドでは未使用となる。
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -193,6 +189,7 @@ impl CodexAdapter {
     }
 
     /// 時刻を注入して JSON 文字列から変換する（テスト用 DI）
+    #[cfg(test)]
     pub fn parse_with_now(
         raw_json: &str,
         now_ts: i64,
@@ -325,7 +322,10 @@ fn convert_snapshot(
 
 impl StatuslineAdapter for CodexAdapter {
     fn parse(&self, raw_json: &str) -> (StatuslineState, Option<RatelimitPayload>) {
-        Self::parse_with_now(raw_json, Utc::now().timestamp())
+        let Ok(snapshot) = serde_json::from_str::<CodexSnapshot>(raw_json) else {
+            return (StatuslineState::default(), None);
+        };
+        convert_snapshot(snapshot, Utc::now().timestamp())
     }
 }
 
