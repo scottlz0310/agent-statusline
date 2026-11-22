@@ -152,14 +152,13 @@ fn build_quota_item(
     now_ts: i64,
 ) -> QuotaItem {
     let used_percentage = window.used_percent.map(clamp_pct);
-    let (reset_in_seconds, reset_time_iso) = match window.resets_at {
-        Some(ts) => {
-            let diff = (ts - now_ts).max(0);
-            let iso = DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339());
-            (Some(diff), iso)
-        }
-        None => (None, None),
-    };
+    let (reset_in_seconds, reset_time_iso) = window
+        .resets_at
+        .and_then(|ts| DateTime::from_timestamp(ts, 0).map(|dt| (ts, dt)))
+        .map_or((None, None), |(ts, dt)| {
+            let diff = ts.saturating_sub(now_ts).max(0);
+            (Some(diff), Some(dt.to_rfc3339()))
+        });
 
     let window_label = format_window_label(window.window_minutes, slot);
     let label = match prefix {
@@ -600,6 +599,47 @@ mod tests {
         assert_eq!(state.quotas[1].label, "Spark 45m");
         assert_eq!(state.quotas[1].used_percentage, Some(25));
         assert_eq!(state.quotas[1].reset_in_seconds, None);
+    }
+
+    #[test]
+    fn test_parse_codex_resets_at_boundaries() {
+        let now = 1_700_000_000i64;
+        let cases = [
+            ("future-valid", Some(now + 3_600), Some(3_600), true),
+            ("past-valid-clamped-to-zero", Some(now - 600), Some(0), true),
+            ("epoch-zero-valid-past", Some(0), Some(0), true),
+            ("out-of-range-min", Some(i64::MIN), None, false),
+            ("out-of-range-max", Some(i64::MAX), None, false),
+            ("missing", None, None, false),
+        ];
+
+        for (name, resets_at, expected_secs, expect_iso) in cases {
+            let resets_json = resets_at.map_or_else(|| "null".to_string(), |v| v.to_string());
+            let raw = format!(
+                r#"{{
+                    "account": {{
+                        "rate_limits": [{{
+                            "limit_id": "codex",
+                            "primary_limit": {{
+                                "used_percent": 42.0,
+                                "window_minutes": 300,
+                                "resets_at": {resets_json}
+                            }}
+                        }}]
+                    }}
+                }}"#
+            );
+            let (state, payload) = CodexAdapter::parse_with_now(&raw, now);
+            assert!(payload.is_none(), "{name}");
+            assert_eq!(state.quotas.len(), 1, "{name}");
+            assert_eq!(state.quotas[0].used_percentage, Some(42), "{name}");
+            assert_eq!(state.quotas[0].reset_in_seconds, expected_secs, "{name}");
+            assert_eq!(
+                state.quotas[0].reset_time_iso.is_some(),
+                expect_iso,
+                "{name}"
+            );
+        }
     }
 
     #[test]
