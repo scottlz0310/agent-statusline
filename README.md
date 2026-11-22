@@ -57,6 +57,18 @@ Windows の検証環境で上記コマンドを実行した際、Microsoft Defen
 cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.6.0 --locked
 ```
 
+> [!NOTE]
+> 既に GitHub Release 版（Windows: `%LOCALAPPDATA%\Programs\agent-statusline`、Linux: `~/.local/bin`）を導入済みの場合、そのディレクトリが Cargo の `bin`（Windows: `%USERPROFILE%\.cargo\bin`、Linux: `~/.cargo/bin`）より先に `PATH` にあると、`install --agent codex` だけでなく Codex CLI が起動する MCP サーバー（`command = "agent-statusline"`）も旧版を起動して失敗します。旧版と同居させる場合は、登録時・Codex 起動時の両方で新版が先に解決されるよう永続的な `PATH` で Cargo の `bin` を公開版より前に配置する（または後述のアンインストール手順で旧公開版バイナリを削除、もしくは `agent-statusline update` で公開版側を `v0.6.0` 以降へ更新する）ようにし、新しいシェルで次を確認してください。
+>
+> ```bash
+> # 先頭に意図した新版バイナリが解決されることを確認（Windows PowerShell は where.exe agent-statusline）
+> which -a agent-statusline
+>
+> # 解決されたバイナリのバージョンと Codex 対応を確認
+> agent-statusline --version
+> agent-statusline mcp codex --help
+> ```
+
 ### リリース公開後のバイナリ更新
 
 ```bash
