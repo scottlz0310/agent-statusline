@@ -81,6 +81,13 @@ grep -n 'agent-statusline/env\|\.local/bin' ~/.profile ~/.bash_profile ~/.bashrc
 
 ### クライアント設定の自動登録
 
+> [!NOTE]
+> Codex CLI 対応（`install --agent codex` / `mcp codex`）は現行の公開 Release（`v0.5.0`）にはまだ含まれていません。Codex 対応版の Release が公開されるまでは、Rust toolchain を使って対応済みコミット（`ed73f6e685539ccd3bf82cae6b1822be799a4431` 以降）をソースから導入してください。
+>
+> ```bash
+> cargo install --git https://github.com/scottlz0310/agent-statusline --rev ed73f6e685539ccd3bf82cae6b1822be799a4431 --locked
+> ```
+
 ```bash
 # 全クライアント（agy, claude, copilot, codex）に一括登録
 agent-statusline install --all
