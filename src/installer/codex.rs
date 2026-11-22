@@ -129,6 +129,17 @@ pub fn install_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<Pa
 
 /// Codex CLI の `config.toml` から `agent-statusline` 設定を安全に解除する
 pub fn uninstall_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<PatchResult> {
+    uninstall_codex_with_origin_reader(target, dry_run, |path| fs::read_to_string(path))
+}
+
+fn uninstall_codex_with_origin_reader<F>(
+    target: &AgentConfigTarget,
+    dry_run: bool,
+    read_origin: F,
+) -> io::Result<PatchResult>
+where
+    F: FnOnce(&Path) -> io::Result<String>,
+{
     if !target.path.exists() {
         return Ok(PatchResult {
             agent: target.agent,
@@ -174,10 +185,11 @@ pub fn uninstall_codex(target: &AgentConfigTarget, dry_run: bool) -> io::Result<
         });
     }
 
-    // `.bak` 上書き前に元の独自 provider を読み出しておく（専用保存先を優先し `.bak` へフォールバック）
+    // `.bak` 上書き前に元の独自 provider を読み出しておく（専用保存先を優先し不在時のみ `.bak` へフォールバック）
+    // 専用保存先の読み取り・JSON 解析エラーは握りつぶさず、設定と復元情報を保持したまま失敗させる。
     let backup_path = make_backup_path(&target.path);
     let restored_provider = if has_our_provider {
-        try_restore_custom_provider(&target.path, &backup_path)
+        try_restore_custom_provider(&target.path, &backup_path, read_origin)?
     } else {
         None
     };
@@ -721,28 +733,75 @@ fn remove_origin_provider_file(config_path: &Path) {
     let _ = fs::remove_file(origin_path);
 }
 
-fn load_origin_provider(config_path: &Path) -> Option<(String, String)> {
+fn load_origin_provider_with_reader<F>(
+    config_path: &Path,
+    read_origin: F,
+) -> io::Result<Option<(String, String)>>
+where
+    F: FnOnce(&Path) -> io::Result<String>,
+{
     let origin_path = make_origin_provider_path(config_path);
-    let content = fs::read_to_string(origin_path).ok()?;
-    let saved: SavedProvider = serde_json::from_str(&content).ok()?;
-    if saved.server == SERVER_NAME && saved.tool == TOOL_NAME {
-        return None;
+    let content = match read_origin(&origin_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(Error::new(
+                err.kind(),
+                format!(
+                    "Failed to read saved Codex provider origin at {}: {err}",
+                    origin_path.display()
+                ),
+            ));
+        }
+    };
+
+    let saved: SavedProvider = serde_json::from_str(&content).map_err(|err| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Invalid saved Codex provider origin at {}: {err}",
+                origin_path.display()
+            ),
+        )
+    })?;
+
+    if saved.server.trim().is_empty()
+        || saved.tool.trim().is_empty()
+        || (saved.server == SERVER_NAME && saved.tool == TOOL_NAME)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Invalid saved Codex provider entry at {}",
+                origin_path.display()
+            ),
+        ));
     }
-    Some((saved.server, saved.tool))
+
+    Ok(Some((saved.server, saved.tool)))
 }
 
-fn try_restore_custom_provider(config_path: &Path, backup_path: &Path) -> Option<(String, String)> {
-    if let Some(origin) = load_origin_provider(config_path) {
-        return Some(origin);
+fn try_restore_custom_provider<F>(
+    config_path: &Path,
+    backup_path: &Path,
+    read_origin: F,
+) -> io::Result<Option<(String, String)>>
+where
+    F: FnOnce(&Path) -> io::Result<String>,
+{
+    if let Some(origin) = load_origin_provider_with_reader(config_path, read_origin)? {
+        return Ok(Some(origin));
     }
     if !backup_path.exists() {
-        return None;
+        return Ok(None);
     }
-    let bak_content = fs::read_to_string(backup_path).ok()?;
-    let bak_doc = bak_content.parse::<DocumentMut>().ok()?;
+    let bak_content = fs::read_to_string(backup_path)?;
+    let Ok(bak_doc) = bak_content.parse::<DocumentMut>() else {
+        return Ok(None);
+    };
     match inspect_provider(&bak_doc) {
-        ProviderState::Custom { server, tool } => Some((server, tool)),
-        _ => None,
+        ProviderState::Custom { server, tool } => Ok(Some((server, tool))),
+        _ => Ok(None),
     }
 }
 
@@ -1472,5 +1531,103 @@ mod tests {
             "codex",
             "--config=/tmp/a.toml"
         ]));
+    }
+
+    #[test]
+    fn test_codex_uninstall_preserves_config_and_origin_on_unreadable_or_corrupt_origin() {
+        let dir = TempDir::new().unwrap();
+        let target = codex_target(&dir);
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            "[tui]\nstatus_line_provider = { server = \"other\", tool = \"custom\" }\n",
+        )
+        .unwrap();
+
+        // 初回インストール → feature flag 改変 → 修復インストール（.bak を上書き）
+        install_codex(&target, false).unwrap();
+        let broken_flag = fs::read_to_string(&target.path).unwrap().replace(
+            "tui_extensions_statusline = true",
+            "tui_extensions_statusline = false",
+        );
+        fs::write(&target.path, broken_flag).unwrap();
+        install_codex(&target, false).unwrap();
+
+        let installed_config = fs::read_to_string(&target.path).unwrap();
+        let origin_path = make_origin_provider_path(&target.path);
+        let valid_origin = fs::read_to_string(&origin_path).unwrap();
+
+        // 1. origin ファイル読み取り失敗（排他ロック相当）では設定・origin とも無変更でエラーを返す
+        let lock_err = uninstall_codex_with_origin_reader(&target, false, |_| {
+            Err(Error::from(ErrorKind::PermissionDenied))
+        })
+        .expect_err("unreadable origin must fail uninstall");
+        assert_eq!(lock_err.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), installed_config);
+        assert_eq!(fs::read_to_string(&origin_path).unwrap(), valid_origin);
+
+        // 2. origin ファイルが不正 JSON の場合も設定・origin とも無変更でエラーを返す
+        fs::write(&origin_path, "{broken json").unwrap();
+        let parse_err = uninstall_codex(&target, false).expect_err("corrupt origin must fail");
+        assert_eq!(parse_err.kind(), ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), installed_config);
+        assert_eq!(fs::read_to_string(&origin_path).unwrap(), "{broken json");
+
+        // 3. origin ファイルを正常状態に戻して再実行すると元の独自プロバイダーが復元される
+        fs::write(&origin_path, &valid_origin).unwrap();
+        let recovered = uninstall_codex(&target, false).unwrap();
+        assert_eq!(recovered.action, PatchAction::RestoredBackup);
+        let doc: DocumentMut = fs::read_to_string(&target.path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["tui"]["status_line_provider"]["server"].as_str(),
+            Some("other")
+        );
+        assert_eq!(
+            doc["tui"]["status_line_provider"]["tool"].as_str(),
+            Some("custom")
+        );
+        assert!(!origin_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_codex_uninstall_preserves_and_recovers_with_windows_exclusive_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let target = codex_target(&dir);
+        fs::create_dir_all(target.path.parent().unwrap()).unwrap();
+        fs::write(
+            &target.path,
+            "[tui]\nstatus_line_provider = { server = \"other\", tool = \"custom\" }\n",
+        )
+        .unwrap();
+
+        install_codex(&target, false).unwrap();
+        let installed_config = fs::read_to_string(&target.path).unwrap();
+        let origin_path = make_origin_provider_path(&target.path);
+
+        // Windows で排他オープン（共有モード 0）している間はエラーを返し設定を保持する
+        let locked_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&origin_path)
+            .unwrap();
+        let err = uninstall_codex(&target, false).expect_err("locked origin must fail uninstall");
+        assert_ne!(err.kind(), ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(&target.path).unwrap(), installed_config);
+        assert!(origin_path.exists());
+        drop(locked_file);
+
+        // ロック解除後の再実行で元の独自プロバイダーが復元される
+        let recovered = uninstall_codex(&target, false).unwrap();
+        assert_eq!(recovered.action, PatchAction::RestoredBackup);
+        let doc: DocumentMut = fs::read_to_string(&target.path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["tui"]["status_line_provider"]["server"].as_str(),
+            Some("other")
+        );
+        assert!(!origin_path.exists());
     }
 }
