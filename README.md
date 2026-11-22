@@ -87,6 +87,16 @@ grep -n 'agent-statusline/env\|\.local/bin' ~/.profile ~/.bash_profile ~/.bashrc
 > ```bash
 > cargo install --git https://github.com/scottlz0310/agent-statusline --rev ed73f6e685539ccd3bf82cae6b1822be799a4431 --locked
 > ```
+>
+> 既に公開版（Windows: `%LOCALAPPDATA%\Programs\agent-statusline`、Linux: `~/.local/bin`）を導入済みの場合、そのディレクトリが Cargo の `bin`（Windows: `%USERPROFILE%\.cargo\bin`、Linux: `~/.cargo/bin`）より先に `PATH` にあると、`install --agent codex` だけでなく Codex CLI が起動する MCP サーバー（`command = "agent-statusline"`）も旧版を起動して失敗します。旧版と同居させる場合は、登録時・Codex 起動時の両方でソース版が先に解決されるよう永続的な `PATH` で Cargo の `bin` を公開版より前に配置（または後述のアンインストール手順で公開版バイナリを削除）し、新しいシェルで次を確認してください。
+>
+> ```bash
+> # 先頭に Cargo の bin 配下が表示されることを確認（Windows PowerShell は where.exe agent-statusline）
+> which -a agent-statusline
+>
+> # 解決されたバイナリが Codex 対応であることを確認（終了コード 0 でヘルプを表示）
+> agent-statusline mcp codex --help
+> ```
 
 ```bash
 # 全クライアント（agy, claude, copilot, codex）に一括登録
