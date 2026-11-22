@@ -54,7 +54,7 @@ Windows の検証環境で上記コマンドを実行した際、Microsoft Defen
 同じ環境では、Rust toolchain を使ってソースからインストールした場合、この検出は発生せず、Antigravity CLI、Claude Code、GitHub Copilot CLI の3クライアントで動作を確認しました。この結果は検証した環境でのものです。Cargo の利用には Rust toolchain が必要です。
 
 ```bash
-cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.5.0 --locked
+cargo install --git https://github.com/scottlz0310/agent-statusline --tag v0.6.0 --locked
 ```
 
 ### リリース公開後のバイナリ更新
@@ -80,23 +80,6 @@ grep -n 'agent-statusline/env\|\.local/bin' ~/.profile ~/.bash_profile ~/.bashrc
 新 installer は `env` helper や receipt を作らず、profile を変更しません。既存の PATH 行が必要なら残してください。Windows の旧 receipt と PATH も自動削除しません。後述のアンインストール手順で整理できます。
 
 ### クライアント設定の自動登録
-
-> [!NOTE]
-> Codex CLI 対応（`install --agent codex` / `mcp codex`）は現行の公開 Release（`v0.5.0`）にはまだ含まれていません。Codex 対応版の Release が公開されるまでは、Rust toolchain を使って対応済みコミット（`ed73f6e685539ccd3bf82cae6b1822be799a4431` 以降）をソースから導入してください。
->
-> ```bash
-> cargo install --git https://github.com/scottlz0310/agent-statusline --rev ed73f6e685539ccd3bf82cae6b1822be799a4431 --locked
-> ```
->
-> 既に公開版（Windows: `%LOCALAPPDATA%\Programs\agent-statusline`、Linux: `~/.local/bin`）を導入済みの場合、そのディレクトリが Cargo の `bin`（Windows: `%USERPROFILE%\.cargo\bin`、Linux: `~/.cargo/bin`）より先に `PATH` にあると、`install --agent codex` だけでなく Codex CLI が起動する MCP サーバー（`command = "agent-statusline"`）も旧版を起動して失敗します。旧版と同居させる場合は、登録時・Codex 起動時の両方でソース版が先に解決されるよう永続的な `PATH` で Cargo の `bin` を公開版より前に配置（または後述のアンインストール手順で公開版バイナリを削除）し、新しいシェルで次を確認してください。
->
-> ```bash
-> # 先頭に Cargo の bin 配下が表示されることを確認（Windows PowerShell は where.exe agent-statusline）
-> which -a agent-statusline
->
-> # 解決されたバイナリが Codex 対応であることを確認（終了コード 0 でヘルプを表示）
-> agent-statusline mcp codex --help
-> ```
 
 ```bash
 # 全クライアント（agy, claude, copilot, codex）に一括登録
