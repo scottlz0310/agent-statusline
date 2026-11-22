@@ -18,7 +18,7 @@ pub enum Commands {
     Render {
         /// Agent type (agy, claude, copilot)
         #[arg(short, long, value_enum, default_value = "agy")]
-        agent: AgentKind,
+        agent: RenderAgentKind,
 
         /// Path to custom config file
         #[arg(short, long)]
@@ -48,7 +48,7 @@ pub enum Commands {
 
     /// Automatically install statusline into agent settings
     Install {
-        /// Target agents to install (comma-separated: agy, claude, copilot)
+        /// Target agents to install (comma-separated: agy, claude, copilot, codex)
         #[arg(short, long, value_delimiter = ',')]
         agent: Vec<AgentKind>,
 
@@ -63,7 +63,7 @@ pub enum Commands {
 
     /// Uninstall statusline from agent settings
     Uninstall {
-        /// Target agents to uninstall
+        /// Target agents to uninstall (comma-separated: agy, claude, copilot, codex)
         #[arg(short, long, value_delimiter = ',')]
         agent: Vec<AgentKind>,
 
@@ -106,14 +106,22 @@ pub enum McpTarget {
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AgentKind {
+pub enum RenderAgentKind {
     Agy,
     Claude,
     Copilot,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AgentKind {
+    Agy,
+    Claude,
+    Copilot,
+    Codex,
+}
+
 impl AgentKind {
-    pub const ALL: [Self; 3] = [Self::Agy, Self::Claude, Self::Copilot];
+    pub const ALL: [Self; 4] = [Self::Agy, Self::Claude, Self::Copilot, Self::Codex];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -121,6 +129,7 @@ impl AgentKind {
             Self::Agy => "agy",
             Self::Claude => "claude",
             Self::Copilot => "copilot",
+            Self::Codex => "codex",
         }
     }
 
@@ -130,6 +139,15 @@ impl AgentKind {
             Self::Agy => "Antigravity CLI (agy)",
             Self::Claude => "Claude Code (claude)",
             Self::Copilot => "GitHub Copilot CLI (copilot)",
+            Self::Codex => "Codex CLI (codex)",
+        }
+    }
+
+    #[must_use]
+    pub const fn config_format_label(self) -> &'static str {
+        match self {
+            Self::Agy | Self::Claude | Self::Copilot => "JSON",
+            Self::Codex => "TOML",
         }
     }
 }

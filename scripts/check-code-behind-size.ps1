@@ -24,11 +24,13 @@ $ErrorActionPreference = "Stop"
 $limits = [ordered]@{
     # エントリポイント・CLI引数解析・ディスパッチ・簡易出力。
     # 301: 設定 TUI の `mod editor;`、302: `mod preview;`、304: `mod tui;` と `config` サブコマンドのディスパッチ 1 行（ロジックは tui/ に置く）、
-    # 308: Codex MCP サーバーの `mod mcp;` と `mcp codex` ディスパッチ 3 行（ロジックは mcp/ に置く #136）
-    "src/main.rs" = 308
+    # 308: Codex MCP サーバーの `mod mcp;` と `mcp codex` ディスパッチ 3 行（ロジックは mcp/ に置く #136）、
+    # 330: Codex TOML 対応に伴う `StatusKind::Incomplete` 表示分岐と Preview 形式ラベル表示（ロジックは installer/codex.rs に置く #136）
+    "src/main.rs" = 330
     # clap CLI 引数定義。121: `config` サブコマンドの引数定義（7 行）、125: `config --no-mouse`（4 行 #79）、
-    # 141: `mcp codex` サブコマンドと `McpTarget` 引数定義（16 行 #136）
-    "src/cli.rs"  = 141
+    # 141: `mcp codex` サブコマンドと `McpTarget` 引数定義（16 行 #136）、
+    # 159: `RenderAgentKind` 分離と `AgentKind::Codex`・`config_format_label` 追加（18 行 #136）
+    "src/cli.rs"  = 159
 }
 
 $violations = New-Object System.Collections.Generic.List[string]

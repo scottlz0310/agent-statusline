@@ -27,10 +27,11 @@ pub struct PatchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusKind {
     Installed,
+    Incomplete(Vec<String>),
     Custom(String),
     NotConfigured,
     FileNotFound,
-    InvalidJson(String),
+    InvalidConfig(String),
 }
 
 #[derive(Debug, Clone)]
@@ -42,9 +43,14 @@ pub struct AgentStatusReport {
     pub enabled: Option<bool>,
 }
 
-/// 対象エージェントの設定ファイルに statusLine を登録・更新する
-pub fn install_to_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Result<PatchResult> {
-    let new_config = target.statusline_config_value();
+/// 対象 JSON 系エージェントの設定ファイルに statusLine を登録・更新する
+pub fn install_json_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Result<PatchResult> {
+    let new_config = target.statusline_config_value().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} does not use JSON statusLine config", target.agent),
+        )
+    })?;
 
     if target.path.exists() {
         let raw_content = fs::read_to_string(&target.path)?;
@@ -159,8 +165,8 @@ pub fn install_to_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Result
     }
 }
 
-/// 対象エージェントの設定ファイルから statusLine 設定を解除する
-pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Result<PatchResult> {
+/// 対象 JSON 系エージェントの設定ファイルから statusLine 設定を解除する
+pub fn uninstall_json_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Result<PatchResult> {
     if !target.path.exists() {
         return Ok(PatchResult {
             agent: target.agent,
@@ -259,9 +265,9 @@ pub fn uninstall_from_agent(target: &AgentConfigTarget, dry_run: bool) -> io::Re
     })
 }
 
-/// 対象エージェントの設定ファイルの statusLine 診断
+/// 対象 JSON 系エージェントの設定ファイルの statusLine 診断
 #[must_use]
-pub fn diagnose_agent(target: &AgentConfigTarget) -> AgentStatusReport {
+pub fn diagnose_json_agent(target: &AgentConfigTarget) -> AgentStatusReport {
     if !target.path.exists() {
         return AgentStatusReport {
             agent: target.agent,
@@ -278,7 +284,7 @@ pub fn diagnose_agent(target: &AgentConfigTarget) -> AgentStatusReport {
             return AgentStatusReport {
                 agent: target.agent,
                 path: target.path.clone(),
-                status: StatusKind::InvalidJson(e.to_string()),
+                status: StatusKind::InvalidConfig(e.to_string()),
                 command: None,
                 enabled: None,
             };
@@ -302,7 +308,7 @@ pub fn diagnose_agent(target: &AgentConfigTarget) -> AgentStatusReport {
             return AgentStatusReport {
                 agent: target.agent,
                 path: target.path.clone(),
-                status: StatusKind::InvalidJson(e.to_string()),
+                status: StatusKind::InvalidConfig(e.to_string()),
                 command: None,
                 enabled: None,
             };
@@ -478,13 +484,13 @@ fn try_restore_custom_statusline(backup_path: &Path, expected_agent: AgentKind) 
     }
 }
 
-fn make_backup_path(path: &Path) -> PathBuf {
+pub(super) fn make_backup_path(path: &Path) -> PathBuf {
     let mut bak = path.as_os_str().to_os_string();
     bak.push(".bak");
     PathBuf::from(bak)
 }
 
-fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+pub(super) fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "Parent directory not found"))?;
@@ -507,6 +513,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::installer::{diagnose_agent, install_to_agent, uninstall_from_agent};
     use tempfile::TempDir;
 
     #[test]
