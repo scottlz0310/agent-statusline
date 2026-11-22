@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-22
+
 ### Added
 
 - `install` / `uninstall` / `status` コマンドで Codex CLI（`$CODEX_HOME/config.toml`、既定 `~/.codex/config.toml`）に対応（`--all` 含む）。コメント保持の TOML 部分更新、`[features] tui_extensions_statusline = true` / `[mcp_servers.agent-statusline]` / `[tui] status_line_provider` の自動設定・整合診断・`.bak` バックアップからの独自プロバイダー復元をサポート (#136)。
@@ -15,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `.cargo/config.toml`: `registry.global-min-publish-age = "3 days"` を追加（Rust 1.100 以降で有効）。公開から 3 日未満のクレートを新規に解決しない。lock file maintenance は Renovate の minimumReleaseAge を迂回するため、無人の自動マージに対する防御として cargo 側で止める
 
 ### Changed
+- README の `cargo install` 例を、このリリースの `v0.6.0` に更新し、リリース前の固定コミット導入注記を削除（旧公開版と Cargo 版が同居する場合の `PATH` 優先・確認手順は維持）。
 - `README.md`・`docs/agent-statusline-spec.md`・`Cargo.toml` の対応クライアント表記・導入手順・アーキテクチャ・既知の制限を Codex CLI 対応に合わせて更新 (#136)。
 - `release.yml` と `prepare-release.yml` の `release-automate` 参照を `v3.3.0` に更新し、`finalize` で `notify_scoop_bucket: true` を有効化してリリース公開後に `scottlz0310/scoop-bucket` へ `repository_dispatch` を送信するように変更。
-- README に Codex CLI の対応状況と、外部レンダラー連携を妨げている公式フックの未提供、および upstream Issue #17827 を追記。
 - `renovate.json` の `extends` から、中央プリセットで解除済みの非推奨プリセット（`options/automerge`・`options/schedule`・`options/security`）への参照を削除した。スケジュール・待機期間・自動マージ等は中央側で既に解除されているため更新の挙動は変わらず、Dependency Dashboard の警告表示が消える。
 - `tasks.md` を撤去した。進捗とタスクは Issue と Pull Request、リポジトリの外のハンドオフで管理する（全項目が完了済みで、参照もなかった）。
 
@@ -165,4 +167,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero-downtime self-update design (`agent-statusline update` and background release check).
 - Task management and tracking document (`tasks.md`).
 
-[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...v0.6.0
