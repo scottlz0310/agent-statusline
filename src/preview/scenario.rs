@@ -133,6 +133,7 @@ fn active(pr_number: u64, round: u32, agent: Option<&str>) -> ActiveReview {
         pr_number,
         round,
         agent: agent.map(str::to_string),
+        started_at: None,
     }
 }
 
@@ -142,5 +143,8 @@ fn queued(pr_number: u64, round: u32, reason: &str) -> QueuedReview {
         pr_number,
         round,
         reason: reason.to_string(),
+        hold_reason: None,
+        queue_position: None,
+        auto_pause_used_pct: None,
     }
 }

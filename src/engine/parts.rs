@@ -179,10 +179,13 @@ pub static PARTS: [PartSpec; 10] = [
         props: &[
             prop("format", PropKind::Format(&["symbol", "items", "style"])),
             prop("symbol", PropKind::Symbol),
-            prop("active_format", PropKind::Format(&["pr", "round", "agent"])),
+            prop(
+                "active_format",
+                PropKind::Format(&["pr", "round", "agent", "elapsed"]),
+            ),
             prop(
                 "waiting_format",
-                PropKind::Format(&["pr", "round", "reason"]),
+                PropKind::Format(&["pr", "round", "reason", "hold"]),
             ),
             prop("separator", PropKind::Separator),
             prop("style", PropKind::Style),
@@ -199,7 +202,7 @@ fn render_review_part(config: &Config, input: &PartInput) -> String {
     }
     let active: Vec<&ActiveReview> = input.reviews.active.iter().collect();
     let waiting: Vec<&QueuedReview> = input.reviews.waiting.iter().collect();
-    render_review(&config.review, &active, &waiting)
+    render_review(&config.review, &active, &waiting, input.reviews.alert)
 }
 
 pub fn find(id: &str) -> Option<&'static PartSpec> {

@@ -100,49 +100,90 @@ pub fn style_to_ansi(codes: &[u8]) -> String {
     }
 }
 
-fn unescape_brackets(s: &str) -> String {
-    s.replace(r"\[", "[").replace(r"\]", "]")
-}
-
 /// インラインスタイル構文 `[text](style)` を分解した中間表現の 1 スパン
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledSpan {
     pub text: String,
     pub codes: Vec<u8>,
+    pub href: Option<String>,
 }
 
-fn push_span(spans: &mut Vec<StyledSpan>, text: &str, codes: Vec<u8>) {
-    if text.is_empty() {
-        return;
-    }
+/// 入力文字列中のバイト範囲 `[start..end)` に紐づくハイパーリンク
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRange {
+    pub start: usize,
+    pub end: usize,
+    pub href: String,
+}
+
+fn href_at(links: &[LinkRange], byte_idx: usize) -> Option<&str> {
+    links
+        .iter()
+        .find(|link| byte_idx >= link.start && byte_idx < link.end)
+        .map(|link| link.href.as_str())
+}
+
+fn push_char(spans: &mut Vec<StyledSpan>, ch: char, codes: &[u8], href: Option<&str>) {
     if let Some(last) = spans.last_mut()
-        && last.codes == codes
+        && last.codes.as_slice() == codes
+        && last.href.as_deref() == href
     {
-        last.text.push_str(text);
+        last.text.push(ch);
     } else {
         spans.push(StyledSpan {
-            text: text.to_string(),
-            codes,
+            text: ch.to_string(),
+            codes: codes.to_vec(),
+            href: href.map(str::to_string),
         });
+    }
+}
+
+fn push_bracket_inner(
+    spans: &mut Vec<StyledSpan>,
+    input: &str,
+    start: usize,
+    end: usize,
+    codes: &[u8],
+    links: &[LinkRange],
+) {
+    let slice = &input[start..end];
+    let mut chars = slice.char_indices().peekable();
+    while let Some((rel_i, ch)) = chars.next() {
+        let abs_i = start + rel_i;
+        if ch == '\\'
+            && let Some(&(next_rel_i, next_ch)) = chars.peek()
+            && (next_ch == '[' || next_ch == ']')
+        {
+            let next_abs_i = start + next_rel_i;
+            push_char(spans, next_ch, codes, href_at(links, next_abs_i));
+            chars.next();
+            continue;
+        }
+        push_char(spans, ch, codes, href_at(links, abs_i));
     }
 }
 
 /// インラインスタイル構文 `[text](style)` をスタイル付きスパン列へ解析する
 pub fn parse_styled_spans(input: &str) -> Vec<StyledSpan> {
+    parse_styled_spans_with_links(input, &[])
+}
+
+/// インラインスタイル構文 `[text](style)` を解析しつつ、入力上のバイト範囲 `links` を
+/// 対応するスパンの `href` へ引き継ぐ
+pub fn parse_styled_spans_with_links(input: &str, links: &[LinkRange]) -> Vec<StyledSpan> {
     let mut spans = Vec::new();
-    let mut plain = String::new();
     let mut chars = input.char_indices().peekable();
 
     while let Some((i, c)) = chars.next() {
         if c == '\\' {
-            if let Some(&(_, next_c)) = chars.peek()
+            if let Some(&(next_i, next_c)) = chars.peek()
                 && (next_c == '[' || next_c == ']' || next_c == '\\')
             {
-                plain.push(next_c);
+                push_char(&mut spans, next_c, &[], href_at(links, next_i));
                 chars.next();
                 continue;
             }
-            plain.push(c);
+            push_char(&mut spans, c, &[], href_at(links, i));
             continue;
         }
 
@@ -150,23 +191,12 @@ pub fn parse_styled_spans(input: &str) -> Vec<StyledSpan> {
             && let Some(close_bracket_pos) = input[i + 1..].find("](")
         {
             let mid = i + 1 + close_bracket_pos;
-            let text = &input[i + 1..mid];
             let after_paren = mid + 2;
             if let Some(close_paren_pos) = input[after_paren..].find(')') {
                 let end = after_paren + close_paren_pos;
                 let style_spec = &input[after_paren..end];
-
                 let codes = parse_style_tokens(style_spec);
-                let unescaped_text = unescape_brackets(text);
-                if codes.is_empty() {
-                    plain.push_str(&unescaped_text);
-                } else {
-                    if !plain.is_empty() {
-                        push_span(&mut spans, &plain, Vec::new());
-                        plain.clear();
-                    }
-                    push_span(&mut spans, &unescaped_text, codes);
-                }
+                push_bracket_inner(&mut spans, input, i + 1, mid, &codes, links);
 
                 // chars を end 以降に進める
                 while let Some(&(next_idx, _)) = chars.peek() {
@@ -180,27 +210,35 @@ pub fn parse_styled_spans(input: &str) -> Vec<StyledSpan> {
             }
         }
 
-        plain.push(c);
-    }
-
-    if !plain.is_empty() {
-        push_span(&mut spans, &plain, Vec::new());
+        push_char(&mut spans, c, &[], href_at(links, i));
     }
 
     spans
 }
 
-/// スタイル付きスパン列を ANSI 装飾付き文字列へ変換する
+/// スタイル付きスパン列を ANSI 装飾付き文字列へ変換する。
+/// ANSI 出力は `href` を使わないため、同じ `codes` が連続するスパンはまとめて 1 回の SGR 装飾にする
 pub fn render_styled_spans(spans: &[StyledSpan]) -> String {
     let mut result = String::new();
-    for span in spans {
-        if span.codes.is_empty() {
-            result.push_str(&span.text);
+    let mut i = 0;
+    while i < spans.len() {
+        let codes = &spans[i].codes;
+        let mut j = i + 1;
+        while j < spans.len() && spans[j].codes == *codes {
+            j += 1;
+        }
+        if codes.is_empty() {
+            for span in &spans[i..j] {
+                result.push_str(&span.text);
+            }
         } else {
-            result.push_str(&style_to_ansi(&span.codes));
-            result.push_str(&span.text);
+            result.push_str(&style_to_ansi(codes));
+            for span in &spans[i..j] {
+                result.push_str(&span.text);
+            }
             result.push_str(RESET);
         }
+        i = j;
     }
     result
 }
@@ -286,16 +324,68 @@ mod tests {
                 StyledSpan {
                     text: "a ".to_string(),
                     codes: vec![],
+                    href: None,
                 },
                 StyledSpan {
                     text: "bc".to_string(),
                     codes: vec![1, 36],
+                    href: None,
                 },
                 StyledSpan {
                     text: " d [e]".to_string(),
                     codes: vec![],
+                    href: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_parse_styled_spans_with_links_preserves_style_and_escapes() {
+        let input = r"[Review \[#42\]|#43](red)";
+        let link42_start = input.find("#42").unwrap();
+        let link43_start = input.find("#43").unwrap();
+        let links = vec![
+            LinkRange {
+                start: link42_start,
+                end: link42_start + 3,
+                href: "https://github.com/o/r/pull/42".to_string(),
+            },
+            LinkRange {
+                start: link43_start,
+                end: link43_start + 3,
+                href: "https://github.com/o/r/pull/43".to_string(),
+            },
+        ];
+        let spans = parse_styled_spans_with_links(input, &links);
+        assert_eq!(
+            spans,
+            vec![
+                StyledSpan {
+                    text: "Review [".to_string(),
+                    codes: vec![31],
+                    href: None,
+                },
+                StyledSpan {
+                    text: "#42".to_string(),
+                    codes: vec![31],
+                    href: Some("https://github.com/o/r/pull/42".to_string()),
+                },
+                StyledSpan {
+                    text: "]|".to_string(),
+                    codes: vec![31],
+                    href: None,
+                },
+                StyledSpan {
+                    text: "#43".to_string(),
+                    codes: vec![31],
+                    href: Some("https://github.com/o/r/pull/43".to_string()),
+                },
+            ]
+        );
+        assert_eq!(
+            render_styled_spans(&spans),
+            "\x1b[31mReview [#42]|#43\x1b[0m"
         );
     }
 }

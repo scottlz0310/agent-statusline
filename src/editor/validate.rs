@@ -41,7 +41,7 @@ impl Report {
 }
 
 const INTEGRATIONS_KEYS: [&str; 1] = ["squirrel_notifier"];
-const SQUIRREL_NOTIFIER_KEYS: [&str; 3] = ["enabled", "output_dir", "summary_path"];
+const SQUIRREL_NOTIFIER_KEYS: [&str; 4] = ["enabled", "output_dir", "summary_path", "status_path"];
 
 pub fn validate(text: &str) -> Report {
     let mut issues = Vec::new();

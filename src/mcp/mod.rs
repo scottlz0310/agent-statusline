@@ -127,7 +127,10 @@ mod tests {
         let text = reply["result"]["contents"][0]["text"].as_str().unwrap();
         assert!(text.contains("myrepo"));
         assert!(text.contains("main"));
-        assert!(text.contains("#99 r2"));
+        assert!(text.contains("\"type\":\"link\""));
+        assert!(text.contains("https://github.com/owner/repo/pull/99"));
+        assert!(text.contains("#99"));
+        assert!(text.contains(" r2"));
         assert!(text.contains("GPT-6.2-Sol (medium)"));
         assert!(text.contains("Ctx: 20%"));
         assert!(text.contains("5h: 15%"));

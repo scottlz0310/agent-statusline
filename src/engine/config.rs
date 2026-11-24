@@ -471,11 +471,11 @@ pub struct ReviewConfig {
     #[serde(default = "default_review_symbol")]
     pub symbol: String,
 
-    /// reviewer 実行中の PR 1 件分 (`$pr` `$round` `$agent`)
+    /// reviewer 実行中の PR 1 件分 (`$pr` `$round` `$agent` `$elapsed`)
     #[serde(default = "default_review_active_format")]
     pub active_format: String,
 
-    /// reviewer 起動待ちの PR 1 件分 (`$pr` `$round` `$reason`)
+    /// reviewer 起動待ちの PR 1 件分 (`$pr` `$round` `$reason` `$hold`)
     #[serde(default = "default_review_waiting_format")]
     pub waiting_format: String,
 
@@ -496,10 +496,10 @@ fn default_review_symbol() -> String {
     "🐿 ".to_string()
 }
 fn default_review_active_format() -> String {
-    "🔍#$pr r$round".to_string()
+    "🔍#$pr r$round $elapsed".to_string()
 }
 fn default_review_waiting_format() -> String {
-    "⏳#$pr r$round".to_string()
+    "⏳#$pr r$round $hold".to_string()
 }
 fn default_review_separator() -> String {
     " ".to_string()
@@ -539,6 +539,10 @@ pub struct SquirrelNotifierConfig {
     /// レビュー・キュー状態サマリ (`statusline-summary.json`) のパス。環境変数展開に対応
     #[serde(default)]
     pub summary_path: Option<String>,
+
+    /// レビュー詳細公開状態 (`review-status.json`) のパス。環境変数展開に対応
+    #[serde(default)]
+    pub status_path: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -551,6 +555,7 @@ impl Default for SquirrelNotifierConfig {
             enabled: true,
             output_dir: None,
             summary_path: None,
+            status_path: None,
         }
     }
 }

@@ -18,7 +18,7 @@ Antigravity CLI、Claude Code、GitHub Copilot CLI、Codex CLI 向けの Rust �
   - `Mcp-Docker` の設計モデルを踏襲。各クライアントの設定ファイル（`settings.json` / Codex の `$CODEX_HOME/config.toml`）への statusline 登録・解除・整合診断をワンコマンドで自動実行。
 - 🐿️ **Squirrel Notifier 連携**:
   - Antigravity CLI / Claude Code / GitHub Copilot CLI のレートリミット状態（5時間枠・週次枠・クォータ残量）を共通スキーマ（`schemaVersion: 1`）に集約し、ローカルへ原子的（Atomic rename）に出力（Codex CLI は Squirrel Notifier が `codex app-server` から直接取得するため statusline 側からの書き出しは行わない）。
-  - Squirrel Notifier が出力するレビュー・キュー状態のサマリから、カレントリポジトリの PR のうちレビュー実行中（🔍）と reviewer 起動待ち（⏳）のものを `$review` に表示（例: `🐿 🔍#31 r2 ⏳#32 r1`、Codex CLI を含む全クライアント共通）。Squirrel Notifier が起動していない場合やリポジトリ外では何も表示しない。
+  - Squirrel Notifier が出力する公開状態（`review-status.json` を優先し、不在時は `statusline-summary.json` へフォールバック）から、カレントリポジトリの PR のうちレビュー実行中（🔍・経過時間）と reviewer 起動待ち（⏳・保留理由 `(CI)` / `(busy#N)` / `(pause N%)` / `(manual)`）、および購読異常・鮮度切れ警告（`⚠auth` / `⚠err` / `⚠stopped` / `⚠stale`）を `$review` に表示（例: `🐿 🔍#31 r2 3m ⏳#32 r1 (CI)`、Codex CLI を含む全クライアント共通）。Codex CLI では PR 番号（`#31` 等）が GitHub PR へのクリック可能リンク（`UiTree` `link` ノード）として描画される。Squirrel Notifier が起動していない場合やリポジトリ外では何も表示しない。
 - 🔄 **自動更新 (`agent-statusline update`)**:
   - GitHub Release から更新し、バイナリを置き換える。描画時の更新確認は 24 時間ごとにバックグラウンドで行う。
 - 🎨 **Starship ライクな TOML 設定**:
