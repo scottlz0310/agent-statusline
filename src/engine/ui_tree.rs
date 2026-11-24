@@ -585,6 +585,55 @@ mod tests {
         let bounded = spans_to_ui_tree(&[many_links]).to_json_string();
         assert_codex_limits(&bounded);
         assert!(bounded.contains("#119"));
+
+        // トップレベルの装飾構文が $review をまたぐ場合も Codex UiTree で色とリンクが両立すること
+        let outer_styled = Config {
+            format: "[Review $review](red)".to_string(),
+            review: crate::engine::config::ReviewConfig {
+                format: "$items".to_string(),
+                waiting_format: "#$pr".to_string(),
+                separator: "|".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let two_waiting = RepoReviews {
+            active: vec![],
+            waiting: vec![
+                QueuedReview {
+                    repository: "o/r".to_string(),
+                    pr_number: 42,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+                QueuedReview {
+                    repository: "o/r".to_string(),
+                    pr_number: 43,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+            ],
+            alert: None,
+        };
+        let outer_json = render_ui_tree(&outer_styled, &state, None, &two_waiting).to_json_string();
+        assert_codex_limits(&outer_json);
+        assert!(!outer_json.contains("[Review "), "{outer_json}");
+        assert!(!outer_json.contains("](red)"), "{outer_json}");
+        assert!(outer_json.contains("\"color\":\"red\""), "{outer_json}");
+        assert!(
+            outer_json.contains("https://github.com/o/r/pull/42"),
+            "{outer_json}"
+        );
+        assert!(
+            outer_json.contains("https://github.com/o/r/pull/43"),
+            "{outer_json}"
+        );
     }
 
     #[test]

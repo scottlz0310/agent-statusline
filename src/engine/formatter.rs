@@ -3,7 +3,9 @@ use crate::engine::config::{
     ModelConfig, PlanConfig, QuotaConfig, ReviewConfig, SandboxConfig, SquirrelNotifierConfig,
 };
 use crate::engine::parts::{PartInput, find, part_ids};
-use crate::engine::style::{StyledSpan, parse_styled_spans, pct_style_name, render_styled_spans};
+use crate::engine::style::{
+    LinkRange, StyledSpan, parse_styled_spans_with_links, pct_style_name, render_styled_spans,
+};
 use crate::engine::template::{Token, expand, tokenize};
 use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews, ReviewAlert};
 use crate::model::state::StatuslineState;
@@ -253,27 +255,75 @@ pub fn render_review_at(
     alert: Option<ReviewAlert>,
     now_ts: i64,
 ) -> String {
+    render_review_with_links_at(cfg, active, waiting, alert, now_ts).0
+}
+
+fn render_review_with_links_at(
+    cfg: &ReviewConfig,
+    active: &[&ActiveReview],
+    waiting: &[&QueuedReview],
+    alert: Option<ReviewAlert>,
+    now_ts: i64,
+) -> (String, Vec<LinkRange>) {
     if cfg.disabled || (active.is_empty() && waiting.is_empty() && alert.is_none()) {
-        return String::new();
+        return (String::new(), Vec::new());
     }
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut items_text = String::new();
+    let mut item_links: Vec<LinkRange> = Vec::new();
+    let mut has_item = false;
+
+    let push_part = |items_text: &mut String,
+                     item_links: &mut Vec<LinkRange>,
+                     has_item: &mut bool,
+                     text: &str,
+                     links: Vec<LinkRange>| {
+        if *has_item {
+            items_text.push_str(&cfg.separator);
+        }
+        let base_offset = items_text.len();
+        items_text.push_str(text);
+        for mut link in links {
+            link.start += base_offset;
+            link.end += base_offset;
+            item_links.push(link);
+        }
+        *has_item = true;
+    };
+
     if let Some(alert) = alert {
-        parts.push(format_alert(alert).to_string());
+        push_part(
+            &mut items_text,
+            &mut item_links,
+            &mut has_item,
+            format_alert(alert),
+            Vec::new(),
+        );
     }
 
     for r in active {
         let elapsed = format_elapsed(r.started_at.as_deref(), now_ts);
-        let rendered = expand(
+        let pr_str = r.pr_number.to_string();
+        let round_str = r.round.to_string();
+        let pr_url = build_github_pr_url(&r.repository, r.pr_number);
+        let (rendered, links) = expand_review_item(
             &cfg.active_format,
             &[
-                ("pr", &r.pr_number.to_string()),
-                ("round", &r.round.to_string()),
+                ("pr", pr_str.as_str()),
+                ("round", round_str.as_str()),
                 ("agent", r.agent.as_deref().unwrap_or("")),
-                ("elapsed", &elapsed),
+                ("elapsed", elapsed.as_str()),
             ],
+            "elapsed",
+            pr_url.as_deref(),
         );
-        parts.push(collapse_empty_suffix(&rendered));
+        push_part(
+            &mut items_text,
+            &mut item_links,
+            &mut has_item,
+            &rendered,
+            links,
+        );
     }
 
     for r in waiting {
@@ -282,33 +332,136 @@ pub fn render_review_at(
             r.queue_position,
             r.auto_pause_used_pct,
         );
-        let rendered = expand(
+        let pr_str = r.pr_number.to_string();
+        let round_str = r.round.to_string();
+        let pr_url = build_github_pr_url(&r.repository, r.pr_number);
+        let (rendered, links) = expand_review_item(
             &cfg.waiting_format,
             &[
-                ("pr", &r.pr_number.to_string()),
-                ("round", &r.round.to_string()),
-                ("reason", &r.reason),
-                ("hold", &hold),
+                ("pr", pr_str.as_str()),
+                ("round", round_str.as_str()),
+                ("reason", r.reason.as_str()),
+                ("hold", hold.as_str()),
             ],
+            "hold",
+            pr_url.as_deref(),
         );
-        parts.push(collapse_empty_suffix(&rendered));
+        push_part(
+            &mut items_text,
+            &mut item_links,
+            &mut has_item,
+            &rendered,
+            links,
+        );
     }
 
-    let items = parts.join(&cfg.separator);
-
-    expand(
-        &cfg.format,
-        &[
-            ("symbol", &cfg.symbol),
-            ("items", &items),
-            ("style", &cfg.style),
-        ],
-    )
+    expand_review_wrapper(cfg, &items_text, &item_links)
 }
 
-/// 省略可能変数（`$elapsed` / `$hold`）が空文字展開されたときに残る末尾余白だけを除去する
-fn collapse_empty_suffix(s: &str) -> String {
-    s.trim_end().to_string()
+/// `cfg.format` を展開しつつ、`$items` 挿入位置に合わせて `item_links` のバイト範囲をシフトする
+fn expand_review_wrapper(
+    cfg: &ReviewConfig,
+    items_text: &str,
+    item_links: &[LinkRange],
+) -> (String, Vec<LinkRange>) {
+    let format_vars = [
+        ("symbol", cfg.symbol.as_str()),
+        ("items", items_text),
+        ("style", cfg.style.as_str()),
+    ];
+    let names: Vec<&str> = format_vars.iter().map(|(name, _)| *name).collect();
+    let mut out = String::with_capacity(cfg.format.len() + items_text.len());
+    let mut out_links = Vec::with_capacity(item_links.len());
+    for token in tokenize(&cfg.format, &names) {
+        match token {
+            Token::Text(text) => out.push_str(text),
+            Token::Var(name) => {
+                if name == "items" {
+                    let base_offset = out.len();
+                    out.push_str(items_text);
+                    for link in item_links {
+                        out_links.push(LinkRange {
+                            start: link.start + base_offset,
+                            end: link.end + base_offset,
+                            href: link.href.clone(),
+                        });
+                    }
+                } else if let Some((_, value)) = format_vars.iter().find(|(n, _)| *n == name) {
+                    out.push_str(value);
+                }
+            }
+        }
+    }
+
+    (out, out_links)
+}
+
+/// 1 件のレビュー項目テンプレートを展開しつつ、
+/// 1) 省略可能変数（`optional_var`: `elapsed` / `hold`）が空展開されたときに付随する余白 1 文字だけを取り除き、
+/// 2) `$pr` 展開位置（直前の固定テキストが `#` で終わる場合は `#` を含む）に PR URL の `LinkRange` を記録する。
+fn expand_review_item(
+    template: &str,
+    vars: &[(&str, &str)],
+    optional_var: &str,
+    pr_url: Option<&str>,
+) -> (String, Vec<LinkRange>) {
+    let names: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
+    let mut out = String::with_capacity(template.len());
+    let mut links = Vec::new();
+    let mut prev_text_ended_with_hash = false;
+    let mut strip_next_leading_space = false;
+
+    for token in tokenize(template, &names) {
+        match token {
+            Token::Text(mut text) => {
+                if strip_next_leading_space {
+                    if let Some(rest) = text.strip_prefix(' ') {
+                        text = rest;
+                    }
+                    strip_next_leading_space = false;
+                }
+                out.push_str(text);
+                prev_text_ended_with_hash = text.ends_with('#');
+            }
+            Token::Var(name) => {
+                strip_next_leading_space = false;
+                let value = vars
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or("", |(_, v)| *v);
+                if name == optional_var && value.is_empty() {
+                    if out.ends_with(' ') {
+                        out.pop();
+                    } else if out.is_empty() {
+                        strip_next_leading_space = true;
+                    }
+                    prev_text_ended_with_hash = false;
+                    continue;
+                }
+                if name == "pr" && !value.is_empty() {
+                    let start = if prev_text_ended_with_hash {
+                        out.len() - 1
+                    } else {
+                        out.len()
+                    };
+                    out.push_str(value);
+                    let end = out.len();
+                    if let Some(url) = pr_url {
+                        links.push(LinkRange {
+                            start,
+                            end,
+                            href: url.to_string(),
+                        });
+                    }
+                } else {
+                    out.push_str(value);
+                }
+                prev_text_ended_with_hash = false;
+            }
+        }
+    }
+
+    (out, links)
 }
 
 /// 収集済みの入力だけから行ごとのスタイル付きスパン列を合成する純関数。
@@ -326,46 +479,66 @@ pub fn compose_lines(
         reviews,
         terminal_width,
     };
+    let mut review_links: Vec<LinkRange> = Vec::new();
     let rendered: Vec<(&str, String)> = used_parts(&config.format)
         .into_iter()
         .filter_map(|id| find(id))
-        .map(|part| (part.id, (part.render)(config, &input)))
+        .map(|part| {
+            if part.id == "review" {
+                if config.integrations.squirrel_notifier.enabled {
+                    let active: Vec<&ActiveReview> = input.reviews.active.iter().collect();
+                    let waiting: Vec<&QueuedReview> = input.reviews.waiting.iter().collect();
+                    let (text, links) = render_review_with_links_at(
+                        &config.review,
+                        &active,
+                        &waiting,
+                        input.reviews.alert,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    review_links = links;
+                    (part.id, text)
+                } else {
+                    (part.id, String::new())
+                }
+            } else {
+                (part.id, (part.render)(config, &input))
+            }
+        })
         .collect();
     let vars: Vec<(&str, &str)> = rendered
         .iter()
         .map(|(id, value)| (*id, value.as_str()))
         .collect();
-    let pr_links = collect_review_pr_links(reviews);
     let known_parts = part_ids();
 
     let mut output_lines = Vec::new();
 
     for line in config.format.lines() {
-        let mut line_spans: Vec<StyledSpan> = Vec::new();
-        let tokens = tokenize(line, &known_parts);
-        let mut plain_buf = String::new();
-        for token in tokens {
+        let mut expanded = String::with_capacity(line.len());
+        let mut line_links: Vec<LinkRange> = Vec::new();
+        for token in tokenize(line, &known_parts) {
             match token {
-                Token::Text(text) => plain_buf.push_str(text),
+                Token::Text(text) => expanded.push_str(text),
                 Token::Var(id) => {
                     let value = vars.iter().find(|(k, _)| *k == id).map_or("", |(_, v)| *v);
-                    if id == "review" && !pr_links.is_empty() && !value.is_empty() {
-                        if !plain_buf.is_empty() {
-                            extend_spans(&mut line_spans, parse_styled_spans(&plain_buf));
-                            plain_buf.clear();
+                    if id == "review" && !review_links.is_empty() && !value.is_empty() {
+                        let base_offset = expanded.len();
+                        expanded.push_str(value);
+                        for link in &review_links {
+                            line_links.push(LinkRange {
+                                start: link.start + base_offset,
+                                end: link.end + base_offset,
+                                href: link.href.clone(),
+                            });
                         }
-                        let review_spans = parse_styled_spans(value);
-                        extend_spans(&mut line_spans, attach_pr_links(review_spans, &pr_links));
                     } else {
-                        plain_buf.push_str(value);
+                        expanded.push_str(value);
                     }
                 }
             }
         }
-        if !plain_buf.is_empty() {
-            extend_spans(&mut line_spans, parse_styled_spans(&plain_buf));
-        }
 
+        let mut line_spans = parse_styled_spans_with_links(&expanded, &line_links);
         trim_trailing_whitespace_spans(&mut line_spans);
         if !line_spans.is_empty() {
             output_lines.push(line_spans);
@@ -373,22 +546,6 @@ pub fn compose_lines(
     }
 
     output_lines
-}
-
-fn extend_spans(dst: &mut Vec<StyledSpan>, src: Vec<StyledSpan>) {
-    for span in src {
-        if span.text.is_empty() {
-            continue;
-        }
-        if let Some(last) = dst.last_mut()
-            && last.codes == span.codes
-            && last.href == span.href
-        {
-            last.text.push_str(&span.text);
-        } else {
-            dst.push(span);
-        }
-    }
 }
 
 fn trim_trailing_whitespace_spans(spans: &mut Vec<StyledSpan>) {
@@ -401,102 +558,6 @@ fn trim_trailing_whitespace_spans(spans: &mut Vec<StyledSpan>) {
             break;
         }
     }
-}
-
-fn collect_review_pr_links(reviews: &RepoReviews) -> Vec<(String, String)> {
-    let mut links = Vec::new();
-    for r in &reviews.active {
-        if let Some(url) = build_github_pr_url(&r.repository, r.pr_number) {
-            links.push((format!("#{}", r.pr_number), url));
-        }
-    }
-    for r in &reviews.waiting {
-        let key = format!("#{}", r.pr_number);
-        if links.iter().any(|(k, _)| k == &key) {
-            continue;
-        }
-        if let Some(url) = build_github_pr_url(&r.repository, r.pr_number) {
-            links.push((key, url));
-        }
-    }
-    links
-}
-
-/// `$review` 部品が生成したスパン列内の `#<prNumber>` トークンへ PR URL を付与する
-fn attach_pr_links(spans: Vec<StyledSpan>, pr_links: &[(String, String)]) -> Vec<StyledSpan> {
-    let mut out = Vec::with_capacity(spans.len());
-    for span in spans {
-        if span.href.is_some() {
-            out.push(span);
-            continue;
-        }
-        let text = span.text.as_str();
-        let mut cursor = 0usize;
-        while cursor < text.len() {
-            let Some((rel_start, token_len, url)) = find_next_pr_token(&text[cursor..], pr_links)
-            else {
-                let rest = &text[cursor..];
-                if !rest.is_empty() {
-                    out.push(StyledSpan {
-                        text: rest.to_string(),
-                        codes: span.codes.clone(),
-                        href: None,
-                    });
-                }
-                break;
-            };
-            let abs_start = cursor + rel_start;
-            let abs_end = abs_start + token_len;
-            if abs_start > cursor {
-                out.push(StyledSpan {
-                    text: text[cursor..abs_start].to_string(),
-                    codes: span.codes.clone(),
-                    href: None,
-                });
-            }
-            out.push(StyledSpan {
-                text: text[abs_start..abs_end].to_string(),
-                codes: span.codes.clone(),
-                href: Some(url.to_string()),
-            });
-            cursor = abs_end;
-        }
-    }
-    out
-}
-
-fn find_next_pr_token<'a>(
-    slice: &str,
-    pr_links: &'a [(String, String)],
-) -> Option<(usize, usize, &'a str)> {
-    let mut best: Option<(usize, usize, &'a str)> = None;
-    for (token, url) in pr_links {
-        let mut offset = 0usize;
-        while let Some(pos) = slice[offset..].find(token.as_str()) {
-            let start = offset + pos;
-            let end = start + token.len();
-            let before_ok = start == 0
-                || !slice[..start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_ascii_alphanumeric());
-            let after_ok = end == slice.len()
-                || !slice[end..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit());
-            if before_ok && after_ok {
-                if best.is_none_or(|(b_start, b_len, _)| {
-                    start < b_start || (start == b_start && token.len() > b_len)
-                }) {
-                    best = Some((start, token.len(), url.as_str()));
-                }
-                break;
-            }
-            offset = start + 1;
-        }
-    }
-    best
 }
 
 /// `format` が参照している部品 ID（既知の部品 ID の最長一致）
@@ -1057,6 +1118,214 @@ mod tests {
                 .iter()
                 .any(|s| s.text.contains("feat/#149-branch") && s.href.is_none())
         );
+    }
+
+    #[test]
+    fn test_compose_preserves_outer_style_across_review_and_links() {
+        let config = Config {
+            format: "[Review $review](red)".to_string(),
+            review: ReviewConfig {
+                format: "$items".to_string(),
+                waiting_format: "#$pr".to_string(),
+                separator: "|".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let reviews = RepoReviews {
+            active: vec![],
+            waiting: vec![
+                QueuedReview {
+                    repository: "scottlz0310/agent-statusline".to_string(),
+                    pr_number: 42,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+                QueuedReview {
+                    repository: "scottlz0310/agent-statusline".to_string(),
+                    pr_number: 43,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+            ],
+            alert: None,
+        };
+
+        // ANSI 出力: 外側の赤色装飾が正しく適用され、装飾構文が露出しないこと
+        let ansi = compose(&config, &compose_state(), None, &reviews, 120);
+        assert_eq!(ansi, "\x1b[31mReview #42|#43\x1b[0m");
+
+        // スパン列: 全スパンが赤色コード [31] を保持し、#42 と #43 にだけ PR URL が付くこと
+        let lines = compose_lines(&config, &compose_state(), None, &reviews, 120);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            vec![
+                StyledSpan {
+                    text: "Review ".to_string(),
+                    codes: vec![31],
+                    href: None,
+                },
+                StyledSpan {
+                    text: "#42".to_string(),
+                    codes: vec![31],
+                    href: Some(
+                        "https://github.com/scottlz0310/agent-statusline/pull/42".to_string()
+                    ),
+                },
+                StyledSpan {
+                    text: "|".to_string(),
+                    codes: vec![31],
+                    href: None,
+                },
+                StyledSpan {
+                    text: "#43".to_string(),
+                    codes: vec![31],
+                    href: Some(
+                        "https://github.com/scottlz0310/agent-statusline/pull/43".to_string()
+                    ),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_pr_links_attach_only_to_pr_variable_expansion() {
+        let config = Config {
+            format: "$review".to_string(),
+            review: ReviewConfig {
+                format: "$items".to_string(),
+                waiting_format: "see #42, current #$pr".to_string(),
+                separator: " | ".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let reviews = RepoReviews {
+            active: vec![],
+            waiting: vec![
+                QueuedReview {
+                    repository: "o/r".to_string(),
+                    pr_number: 42,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+                QueuedReview {
+                    repository: "o/r".to_string(),
+                    pr_number: 43,
+                    round: 1,
+                    reason: "opened".to_string(),
+                    hold_reason: None,
+                    queue_position: None,
+                    auto_pause_used_pct: None,
+                },
+            ],
+            alert: None,
+        };
+
+        let lines = compose_lines(&config, &compose_state(), None, &reviews, 120);
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0];
+        let linked: Vec<(&str, &str)> = spans
+            .iter()
+            .filter_map(|s| s.href.as_deref().map(|h| (s.text.as_str(), h)))
+            .collect();
+        // 固定文言中の "see #42" にはリンクが付かず、各 $pr 展開位置の 2 箇所だけに付くこと
+        assert_eq!(
+            linked,
+            vec![
+                ("#42", "https://github.com/o/r/pull/42"),
+                ("#43", "https://github.com/o/r/pull/43"),
+            ]
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text.contains("see #42, current ") && s.href.is_none())
+        );
+
+        // `#` が前置されない `$pr` の場合は番号部分のみにリンクが付くこと
+        let plain_pr_cfg = Config {
+            format: "$review".to_string(),
+            review: ReviewConfig {
+                format: "$items".to_string(),
+                waiting_format: "PR $pr".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plain_lines = compose_lines(&plain_pr_cfg, &compose_state(), None, &reviews, 120);
+        let plain_linked: Vec<(&str, &str)> = plain_lines[0]
+            .iter()
+            .filter_map(|s| s.href.as_deref().map(|h| (s.text.as_str(), h)))
+            .collect();
+        assert_eq!(
+            plain_linked,
+            vec![
+                ("42", "https://github.com/o/r/pull/42"),
+                ("43", "https://github.com/o/r/pull/43"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_render_review_preserves_explicit_spaces_and_trims_only_optional_var_space() {
+        let w42 = waiting(42, 1, "opened");
+        let w43 = waiting(43, 1, "opened");
+        let w44_with_hold = QueuedReview {
+            hold_reason: Some("ciPending".to_string()),
+            ..waiting(44, 1, "opened")
+        };
+
+        let cases = [
+            (
+                "explicit-trailing-space-without-optional-var",
+                "PR #$pr ",
+                "|",
+                vec![&w42, &w43],
+                "PR #42 |PR #43 ",
+            ),
+            (
+                "optional-var-empty-trims-only-its-preceding-space",
+                "PR #$pr $hold ",
+                "|",
+                vec![&w42, &w43],
+                "PR #42 |PR #43 ",
+            ),
+            (
+                "optional-var-present-keeps-both-spaces",
+                "PR #$pr $hold ",
+                "|",
+                vec![&w44_with_hold, &w43],
+                "PR #44 (CI) |PR #43 ",
+            ),
+            (
+                "leading-optional-var-empty-trims-following-space",
+                "$hold #$pr",
+                "|",
+                vec![&w42, &w44_with_hold],
+                "#42|(CI) #44",
+            ),
+        ];
+
+        for (name, waiting_format, separator, list, expected) in cases {
+            let cfg = ReviewConfig {
+                format: "$items".to_string(),
+                waiting_format: waiting_format.to_string(),
+                separator: separator.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(render_review(&cfg, &[], &list, None), expected, "{name}");
+        }
     }
 
     #[test]
