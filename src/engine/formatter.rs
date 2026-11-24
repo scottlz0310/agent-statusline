@@ -5,13 +5,16 @@ use crate::engine::config::{
 use crate::engine::parts::{PartInput, find, part_ids};
 use crate::engine::style::{StyledSpan, parse_styled_spans, pct_style_name, render_styled_spans};
 use crate::engine::template::{Token, expand, tokenize};
-use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews};
+use crate::model::review_summary::{ActiveReview, QueuedReview, RepoReviews, ReviewAlert};
 use crate::model::state::StatuslineState;
 use crate::modules::context::format_tokens;
 use crate::modules::directory::{TruncationMode, format_path};
 use crate::modules::git::{GitQuery, GitStatus, get_git_status};
 use crate::modules::quota::format_reset_seconds;
-use crate::modules::review::{default_summary_path, load_summary, reviews_for_repo};
+use crate::modules::review::{
+    build_github_pr_url, default_status_path, default_summary_path, format_alert, format_elapsed,
+    format_hold_badge, load_review_status, load_summary, reviews_for_repo, reviews_from_status,
+};
 use crate::sink::notifier::expand_env_path;
 
 pub fn render_directory(
@@ -238,35 +241,60 @@ pub fn render_review(
     cfg: &ReviewConfig,
     active: &[&ActiveReview],
     waiting: &[&QueuedReview],
+    alert: Option<ReviewAlert>,
 ) -> String {
-    if cfg.disabled || (active.is_empty() && waiting.is_empty()) {
+    render_review_at(cfg, active, waiting, alert, chrono::Utc::now().timestamp())
+}
+
+pub fn render_review_at(
+    cfg: &ReviewConfig,
+    active: &[&ActiveReview],
+    waiting: &[&QueuedReview],
+    alert: Option<ReviewAlert>,
+    now_ts: i64,
+) -> String {
+    if cfg.disabled || (active.is_empty() && waiting.is_empty() && alert.is_none()) {
         return String::new();
     }
 
-    let items = active
-        .iter()
-        .map(|r| {
-            expand(
-                &cfg.active_format,
-                &[
-                    ("pr", &r.pr_number.to_string()),
-                    ("round", &r.round.to_string()),
-                    ("agent", r.agent.as_deref().unwrap_or("")),
-                ],
-            )
-        })
-        .chain(waiting.iter().map(|r| {
-            expand(
-                &cfg.waiting_format,
-                &[
-                    ("pr", &r.pr_number.to_string()),
-                    ("round", &r.round.to_string()),
-                    ("reason", &r.reason),
-                ],
-            )
-        }))
-        .collect::<Vec<_>>()
-        .join(&cfg.separator);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(alert) = alert {
+        parts.push(format_alert(alert).to_string());
+    }
+
+    for r in active {
+        let elapsed = format_elapsed(r.started_at.as_deref(), now_ts);
+        let rendered = expand(
+            &cfg.active_format,
+            &[
+                ("pr", &r.pr_number.to_string()),
+                ("round", &r.round.to_string()),
+                ("agent", r.agent.as_deref().unwrap_or("")),
+                ("elapsed", &elapsed),
+            ],
+        );
+        parts.push(collapse_empty_suffix(&rendered));
+    }
+
+    for r in waiting {
+        let hold = format_hold_badge(
+            r.hold_reason.as_deref(),
+            r.queue_position,
+            r.auto_pause_used_pct,
+        );
+        let rendered = expand(
+            &cfg.waiting_format,
+            &[
+                ("pr", &r.pr_number.to_string()),
+                ("round", &r.round.to_string()),
+                ("reason", &r.reason),
+                ("hold", &hold),
+            ],
+        );
+        parts.push(collapse_empty_suffix(&rendered));
+    }
+
+    let items = parts.join(&cfg.separator);
 
     expand(
         &cfg.format,
@@ -278,15 +306,9 @@ pub fn render_review(
     )
 }
 
-/// `format` が参照している部品 ID（既知の部品 ID の最長一致）
-fn used_parts(format: &str) -> Vec<&str> {
-    tokenize(format, &part_ids())
-        .into_iter()
-        .filter_map(|token| match token {
-            Token::Var(id) => Some(id),
-            Token::Text(_) => None,
-        })
-        .collect()
+/// 省略可能変数（`$elapsed` / `$hold`）が空文字展開されたときに残る末尾余白だけを除去する
+fn collapse_empty_suffix(s: &str) -> String {
+    s.trim_end().to_string()
 }
 
 /// 収集済みの入力だけから行ごとのスタイル付きスパン列を合成する純関数。
@@ -313,18 +335,179 @@ pub fn compose_lines(
         .iter()
         .map(|(id, value)| (*id, value.as_str()))
         .collect();
+    let pr_links = collect_review_pr_links(reviews);
+    let known_parts = part_ids();
 
     let mut output_lines = Vec::new();
 
     for line in config.format.lines() {
-        let filled = expand(line, &vars);
-        let trimmed = filled.trim_end();
-        if !trimmed.is_empty() {
-            output_lines.push(parse_styled_spans(trimmed));
+        let mut line_spans: Vec<StyledSpan> = Vec::new();
+        let tokens = tokenize(line, &known_parts);
+        let mut plain_buf = String::new();
+        for token in tokens {
+            match token {
+                Token::Text(text) => plain_buf.push_str(text),
+                Token::Var(id) => {
+                    let value = vars.iter().find(|(k, _)| *k == id).map_or("", |(_, v)| *v);
+                    if id == "review" && !pr_links.is_empty() && !value.is_empty() {
+                        if !plain_buf.is_empty() {
+                            extend_spans(&mut line_spans, parse_styled_spans(&plain_buf));
+                            plain_buf.clear();
+                        }
+                        let review_spans = parse_styled_spans(value);
+                        extend_spans(&mut line_spans, attach_pr_links(review_spans, &pr_links));
+                    } else {
+                        plain_buf.push_str(value);
+                    }
+                }
+            }
+        }
+        if !plain_buf.is_empty() {
+            extend_spans(&mut line_spans, parse_styled_spans(&plain_buf));
+        }
+
+        trim_trailing_whitespace_spans(&mut line_spans);
+        if !line_spans.is_empty() {
+            output_lines.push(line_spans);
         }
     }
 
     output_lines
+}
+
+fn extend_spans(dst: &mut Vec<StyledSpan>, src: Vec<StyledSpan>) {
+    for span in src {
+        if span.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = dst.last_mut()
+            && last.codes == span.codes
+            && last.href == span.href
+        {
+            last.text.push_str(&span.text);
+        } else {
+            dst.push(span);
+        }
+    }
+}
+
+fn trim_trailing_whitespace_spans(spans: &mut Vec<StyledSpan>) {
+    while let Some(last) = spans.last_mut() {
+        let trimmed_len = last.text.trim_end().len();
+        if trimmed_len == 0 {
+            spans.pop();
+        } else {
+            last.text.truncate(trimmed_len);
+            break;
+        }
+    }
+}
+
+fn collect_review_pr_links(reviews: &RepoReviews) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    for r in &reviews.active {
+        if let Some(url) = build_github_pr_url(&r.repository, r.pr_number) {
+            links.push((format!("#{}", r.pr_number), url));
+        }
+    }
+    for r in &reviews.waiting {
+        let key = format!("#{}", r.pr_number);
+        if links.iter().any(|(k, _)| k == &key) {
+            continue;
+        }
+        if let Some(url) = build_github_pr_url(&r.repository, r.pr_number) {
+            links.push((key, url));
+        }
+    }
+    links
+}
+
+/// `$review` 部品が生成したスパン列内の `#<prNumber>` トークンへ PR URL を付与する
+fn attach_pr_links(spans: Vec<StyledSpan>, pr_links: &[(String, String)]) -> Vec<StyledSpan> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.href.is_some() {
+            out.push(span);
+            continue;
+        }
+        let text = span.text.as_str();
+        let mut cursor = 0usize;
+        while cursor < text.len() {
+            let Some((rel_start, token_len, url)) = find_next_pr_token(&text[cursor..], pr_links)
+            else {
+                let rest = &text[cursor..];
+                if !rest.is_empty() {
+                    out.push(StyledSpan {
+                        text: rest.to_string(),
+                        codes: span.codes.clone(),
+                        href: None,
+                    });
+                }
+                break;
+            };
+            let abs_start = cursor + rel_start;
+            let abs_end = abs_start + token_len;
+            if abs_start > cursor {
+                out.push(StyledSpan {
+                    text: text[cursor..abs_start].to_string(),
+                    codes: span.codes.clone(),
+                    href: None,
+                });
+            }
+            out.push(StyledSpan {
+                text: text[abs_start..abs_end].to_string(),
+                codes: span.codes.clone(),
+                href: Some(url.to_string()),
+            });
+            cursor = abs_end;
+        }
+    }
+    out
+}
+
+fn find_next_pr_token<'a>(
+    slice: &str,
+    pr_links: &'a [(String, String)],
+) -> Option<(usize, usize, &'a str)> {
+    let mut best: Option<(usize, usize, &'a str)> = None;
+    for (token, url) in pr_links {
+        let mut offset = 0usize;
+        while let Some(pos) = slice[offset..].find(token.as_str()) {
+            let start = offset + pos;
+            let end = start + token.len();
+            let before_ok = start == 0
+                || !slice[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric());
+            let after_ok = end == slice.len()
+                || !slice[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit());
+            if before_ok && after_ok {
+                if best.is_none_or(|(b_start, b_len, _)| {
+                    start < b_start || (start == b_start && token.len() > b_len)
+                }) {
+                    best = Some((start, token.len(), url.as_str()));
+                }
+                break;
+            }
+            offset = start + 1;
+        }
+    }
+    best
+}
+
+/// `format` が参照している部品 ID（既知の部品 ID の最長一致）
+fn used_parts(format: &str) -> Vec<&str> {
+    tokenize(format, &part_ids())
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Var(id) => Some(id),
+            Token::Text(_) => None,
+        })
+        .collect()
 }
 
 /// 収集済みの入力だけからステータスラインを合成する純関数。Git・ファイル・環境変数には触れない
@@ -387,11 +570,32 @@ pub fn resolve_review_summary_path(
         .or_else(default_summary_path)
 }
 
-/// Squirrel Notifier のサマリからカレントリポジトリ分のレビュー状態を読み込む
+/// Squirrel Notifier の詳細公開状態 (`review-status.json`) パスを解決する。
+/// `summary_path` のみ明示されている場合は既存設定との互換のため `None` を返す
+pub fn resolve_review_status_path(
+    integration: &SquirrelNotifierConfig,
+) -> Option<std::path::PathBuf> {
+    if let Some(custom) = integration.status_path.as_deref() {
+        return Some(expand_env_path(custom));
+    }
+    if integration.summary_path.is_some() {
+        return None;
+    }
+    default_status_path()
+}
+
+/// Squirrel Notifier の公開 JSON からカレントリポジトリ分のレビュー状態を読み込む。
+/// `review-status.json` を優先し、不在・破損・未対応スキーマ時は `statusline-summary.json` へフォールバックする
 fn load_repo_reviews(integration: &SquirrelNotifierConfig, repo: Option<&str>) -> RepoReviews {
     let Some(repo) = repo else {
         return RepoReviews::default();
     };
+    if let Some(status_path) = resolve_review_status_path(integration)
+        && let Some(doc) = load_review_status(&status_path)
+    {
+        return reviews_from_status(&doc, repo);
+    }
+
     let path = resolve_review_summary_path(integration);
     let Some(summary) = path.as_deref().and_then(load_summary) else {
         return RepoReviews::default();
@@ -400,6 +604,7 @@ fn load_repo_reviews(integration: &SquirrelNotifierConfig, repo: Option<&str>) -
     RepoReviews {
         active: active.into_iter().cloned().collect(),
         waiting: waiting.into_iter().cloned().collect(),
+        alert: None,
     }
 }
 
@@ -664,6 +869,7 @@ mod tests {
             pr_number,
             round,
             agent: agent.map(str::to_string),
+            started_at: None,
         }
     }
 
@@ -673,6 +879,9 @@ mod tests {
             pr_number,
             round,
             reason: reason.to_string(),
+            hold_reason: None,
+            queue_position: None,
+            auto_pause_used_pct: None,
         }
     }
 
@@ -715,7 +924,11 @@ mod tests {
             ("disabled", &disabled, vec![&a[0]], vec![&w[0]], ""),
         ];
         for (name, cfg, active, waiting, expected) in cases {
-            assert_eq!(render_review(cfg, &active, &waiting), expected, "{name}");
+            assert_eq!(
+                render_review(cfg, &active, &waiting, None),
+                expected,
+                "{name}"
+            );
         }
     }
 
@@ -752,8 +965,138 @@ mod tests {
             let reviews = load_repo_reviews(integration, repo);
             let active: Vec<&ActiveReview> = reviews.active.iter().collect();
             let waiting: Vec<&QueuedReview> = reviews.waiting.iter().collect();
-            assert_eq!(render_review(&cfg, &active, &waiting), expected, "{name}");
+            assert_eq!(
+                render_review(&cfg, &active, &waiting, None),
+                expected,
+                "{name}"
+            );
         }
+    }
+
+    #[test]
+    fn test_render_review_rich_status_and_pr_links() {
+        let cfg = ReviewConfig {
+            format: "$symbol$items".to_string(),
+            ..Default::default()
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-24T10:05:00Z")
+            .unwrap()
+            .timestamp();
+        let act = ActiveReview {
+            repository: "scottlz0310/agent-statusline".to_string(),
+            pr_number: 149,
+            round: 2,
+            agent: Some("codex".to_string()),
+            started_at: Some("2026-11-24T10:02:00Z".to_string()),
+        };
+        let wait_ci = QueuedReview {
+            repository: "scottlz0310/agent-statusline".to_string(),
+            pr_number: 150,
+            round: 1,
+            reason: "opened".to_string(),
+            hold_reason: Some("ciPending".to_string()),
+            queue_position: None,
+            auto_pause_used_pct: None,
+        };
+        let wait_pause = QueuedReview {
+            repository: "scottlz0310/agent-statusline".to_string(),
+            pr_number: 151,
+            round: 1,
+            reason: "synchronized".to_string(),
+            hold_reason: Some("autoPause".to_string()),
+            queue_position: Some(1),
+            auto_pause_used_pct: Some(96),
+        };
+
+        assert_eq!(
+            render_review_at(&cfg, &[&act], &[&wait_ci, &wait_pause], None, now),
+            "🐿 🔍#149 r2 3m ⏳#150 r1 (CI) ⏳#151 r1 (pause 96%)"
+        );
+        assert_eq!(
+            render_review_at(&cfg, &[], &[], Some(ReviewAlert::AuthRequired), now),
+            "🐿 ⚠auth"
+        );
+        assert_eq!(
+            render_review_at(&cfg, &[], &[], Some(ReviewAlert::Stale), now),
+            "🐿 ⚠stale"
+        );
+
+        // compose_lines: $review 部品内の PR 番号だけに href が付き、他部品の #149 には付かない
+        let config = Config {
+            format: "$git_branch$review".to_string(),
+            ..Default::default()
+        };
+        let git = compose_git("feat/#149-branch", false);
+        let reviews = RepoReviews {
+            active: vec![act],
+            waiting: vec![wait_ci],
+            alert: None,
+        };
+        let lines = compose_lines(&config, &compose_state(), Some(&git), &reviews, 120);
+        let spans = &lines[0];
+        let linked: Vec<(&str, &str)> = spans
+            .iter()
+            .filter_map(|s| s.href.as_deref().map(|h| (s.text.as_str(), h)))
+            .collect();
+        assert_eq!(
+            linked,
+            vec![
+                (
+                    "#149",
+                    "https://github.com/scottlz0310/agent-statusline/pull/149"
+                ),
+                (
+                    "#150",
+                    "https://github.com/scottlz0310/agent-statusline/pull/150"
+                ),
+            ]
+        );
+        // ブランチ名中の #149 にはリンクが付いていないこと
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text.contains("feat/#149-branch") && s.href.is_none())
+        );
+    }
+
+    #[test]
+    fn test_load_repo_reviews_prefers_status_path_and_falls_back_to_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_path = dir.path().join("review-status.json");
+        let summary_path = dir.path().join("statusline-summary.json");
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &status_path,
+            format!(
+                r#"{{"schemaVersion":1,"updatedAt":"{now_iso}","subscription":{{"state":"running"}},"items":[{{"repository":"owner/repo","prNumber":42,"round":1,"reason":"opened","state":"waiting","holdReason":"manual"}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &summary_path,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":1,"items":[{"repository":"owner/repo","prNumber":7,"round":1,"reason":"opened"}]},"activeReviews":[]}"#,
+        )
+        .unwrap();
+
+        let both = SquirrelNotifierConfig {
+            enabled: true,
+            output_dir: None,
+            summary_path: Some(summary_path.to_string_lossy().to_string()),
+            status_path: Some(status_path.to_string_lossy().to_string()),
+        };
+        let from_status = load_repo_reviews(&both, Some("owner/repo"));
+        assert_eq!(from_status.waiting.len(), 1);
+        assert_eq!(from_status.waiting[0].pr_number, 42);
+        assert_eq!(
+            from_status.waiting[0].hold_reason.as_deref(),
+            Some("manual")
+        );
+
+        // status_path が壊れているときは summary_path へフォールバック
+        std::fs::write(&status_path, "{broken").unwrap();
+        let fallback = load_repo_reviews(&both, Some("owner/repo"));
+        assert_eq!(fallback.waiting.len(), 1);
+        assert_eq!(fallback.waiting[0].pr_number, 7);
     }
 
     fn compose_state() -> StatuslineState {
@@ -784,6 +1127,7 @@ mod tests {
         let reviews = RepoReviews {
             active: vec![active(31, 2, None)],
             waiting: vec![waiting(32, 1, "opened")],
+            alert: None,
         };
         let state = compose_state();
         let dirty = compose_git("main", true);

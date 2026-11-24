@@ -196,8 +196,8 @@ hide_zero = false                    # true にすると使用率 0% のクォ�
 [review]
 symbol = "🐿 "
 format = "[$symbol$items]($style) "
-active_format = "🔍#$pr r$round"   # $pr $round $agent
-waiting_format = "⏳#$pr r$round"  # $pr $round $reason
+active_format = "🔍#$pr r$round $elapsed"   # $pr $round $agent $elapsed
+waiting_format = "⏳#$pr r$round $hold"     # $pr $round $reason $hold
 separator = " "
 style = "yellow"
 
@@ -205,11 +205,18 @@ style = "yellow"
 enabled = true
 output_dir = "%LOCALAPPDATA%/SquirrelNotifier/ratelimit-status"
 summary_path = "%LOCALAPPDATA%/SquirrelNotifier/statusline-summary.json"
+status_path = "%LOCALAPPDATA%/SquirrelNotifier/review-status.json"
 ```
 
 ### 5.2 レビュー・キュー状態 (`$review`)
 
-Squirrel Notifier が出力する `statusline-summary.json`（`schemaVersion: 1`。契約は squirrel-notifier の `docs/statusline-integration.md`）を読み、カレントリポジトリの PR のうち、reviewer 実行中（`activeReviews`）と起動待ち（`queue.items`）のものを、この順で表示する。
+Squirrel Notifier が出力する公開状態 `review-status.json`（`schemaVersion: 1`、契約は squirrel-notifier の `docs/review-status-contract.md`）を優先して読み込み、不在・破損・未対応スキーマ時は従来の `statusline-summary.json`（`schemaVersion: 1`）へフォールバックする（`summary_path` のみ明示指定されている場合は既存設定との互換を保ち `summary_path` のみを使用）。カレントリポジトリの PR のうち、reviewer 実行中（`running` / `activeReviews`）と起動待ち（`waiting` / `queue.items`）をこの順で表示する。
+
+* `review-status.json` 読み込み時の追加情報:
+  * 実行中 PR の `startedAt` から経過時間（`$elapsed`: 例 `45s`, `3m`, `1h2m`）を算出して表示する（`statusline-summary.json` フォールバック時は空文字となり余白も除去される）。
+  * 待機中 PR の `holdReason` / `queuePosition` / `autoPause.usedPercentage` から待機理由バッジ（`$hold`: `(CI)` / `(busy#N)` / `(pause N%)` / `(manual)` 等）を表示する。
+  * `subscription.state` が `authRequired` / `error` / `stopped` の場合、または `updatedAt` が 3 分（180 秒）超古い場合（異常終了による鮮度切れ）は、警告（`⚠auth` / `⚠err` / `⚠stopped` / `⚠stale`）を表示する（鮮度切れ時は古い PR 一覧を表示しない）。
+  * Codex CLI の `UiTree` 描画では、`$review` 内の PR 番号（`#N`）を GitHub PR（`https://github.com/<owner>/<repo>/pull/<N>`）への `link` ノードとして出力する（ANSI 出力は不変）。
 
 * カレントリポジトリは、gix で解決した fetch 用の既定リモートの URL から `owner/repo` を取り出して特定する。既定リモートは、現在のブランチの upstream、`origin`、唯一のリモートの順で決まる。サマリの `repository` とは大文字小文字を区別せずに比較する。
 * サマリの `repository` は GitHub の `owner/repo` なので、ホストが `github.com`（SSH over 443 の `ssh.github.com` を含む）のリモートだけを対象にする。GitLab など別ホストの同名リポジトリは一致させない。`~/.ssh/config` のホスト別名は gix が解決しないため対象外。

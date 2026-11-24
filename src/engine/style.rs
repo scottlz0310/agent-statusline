@@ -109,6 +109,7 @@ fn unescape_brackets(s: &str) -> String {
 pub struct StyledSpan {
     pub text: String,
     pub codes: Vec<u8>,
+    pub href: Option<String>,
 }
 
 fn push_span(spans: &mut Vec<StyledSpan>, text: &str, codes: Vec<u8>) {
@@ -117,12 +118,14 @@ fn push_span(spans: &mut Vec<StyledSpan>, text: &str, codes: Vec<u8>) {
     }
     if let Some(last) = spans.last_mut()
         && last.codes == codes
+        && last.href.is_none()
     {
         last.text.push_str(text);
     } else {
         spans.push(StyledSpan {
             text: text.to_string(),
             codes,
+            href: None,
         });
     }
 }
@@ -190,17 +193,29 @@ pub fn parse_styled_spans(input: &str) -> Vec<StyledSpan> {
     spans
 }
 
-/// スタイル付きスパン列を ANSI 装飾付き文字列へ変換する
+/// スタイル付きスパン列を ANSI 装飾付き文字列へ変換する。
+/// ANSI 出力は `href` を使わないため、同じ `codes` が連続するスパンはまとめて 1 回の SGR 装飾にする
 pub fn render_styled_spans(spans: &[StyledSpan]) -> String {
     let mut result = String::new();
-    for span in spans {
-        if span.codes.is_empty() {
-            result.push_str(&span.text);
+    let mut i = 0;
+    while i < spans.len() {
+        let codes = &spans[i].codes;
+        let mut j = i + 1;
+        while j < spans.len() && spans[j].codes == *codes {
+            j += 1;
+        }
+        if codes.is_empty() {
+            for span in &spans[i..j] {
+                result.push_str(&span.text);
+            }
         } else {
-            result.push_str(&style_to_ansi(&span.codes));
-            result.push_str(&span.text);
+            result.push_str(&style_to_ansi(codes));
+            for span in &spans[i..j] {
+                result.push_str(&span.text);
+            }
             result.push_str(RESET);
         }
+        i = j;
     }
     result
 }
@@ -286,14 +301,17 @@ mod tests {
                 StyledSpan {
                     text: "a ".to_string(),
                     codes: vec![],
+                    href: None,
                 },
                 StyledSpan {
                     text: "bc".to_string(),
                     codes: vec![1, 36],
+                    href: None,
                 },
                 StyledSpan {
                     text: " d [e]".to_string(),
                     codes: vec![],
+                    href: None,
                 },
             ]
         );

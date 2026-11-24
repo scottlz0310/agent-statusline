@@ -13,10 +13,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::engine::config::{Config, SquirrelNotifierConfig, resolve_config_path};
-use crate::engine::formatter::resolve_review_summary_path;
-use crate::model::review_summary::{RepoReviews, ReviewSummary};
+use crate::engine::formatter::{resolve_review_status_path, resolve_review_summary_path};
+use crate::model::review_summary::{RepoReviews, ReviewStatusDocument, ReviewSummary};
 use crate::modules::git::{GitQuery, GitStatus, get_git_status};
-use crate::modules::review::{parse_summary, reviews_for_repo};
+use crate::modules::review::{
+    parse_review_status, parse_summary, reviews_for_repo, reviews_from_status,
+};
 
 /// Git 状態キャッシュの既定 TTL
 pub const DEFAULT_GIT_TTL: Duration = Duration::from_secs(3);
@@ -108,9 +110,11 @@ impl ConfigCache {
     }
 }
 
-/// `statusline-summary.json` の mtime/サイズ監視キャッシュ
+/// `review-status.json` および `statusline-summary.json` の mtime/サイズ監視キャッシュ
 #[derive(Default)]
 pub struct ReviewSummaryCache {
+    status_stamp: Option<FileStamp>,
+    status_doc: Option<ReviewStatusDocument>,
     stamp: Option<FileStamp>,
     summary: Option<ReviewSummary>,
 }
@@ -132,15 +136,34 @@ impl ReviewSummaryCache {
         &mut self,
         integration: &SquirrelNotifierConfig,
         repo: Option<&str>,
-        read_file: F,
+        mut read_file: F,
     ) -> RepoReviews
     where
-        F: FnOnce(&Path) -> io::Result<String>,
+        F: FnMut(&Path) -> io::Result<String>,
     {
         let Some(repo) = repo else {
             return RepoReviews::default();
         };
 
+        // 1. 詳細公開契約 review-status.json を優先（summary_path のみ明示時はスキップ）
+        let status_path = resolve_review_status_path(integration);
+        let current_status_stamp = status_path.as_deref().and_then(FileStamp::of);
+        if current_status_stamp != self.status_stamp {
+            if let (Some(path), Some(stamp)) = (status_path.as_deref(), current_status_stamp) {
+                if let Ok(content) = read_file(path) {
+                    self.status_doc = parse_review_status(&content);
+                    self.status_stamp = Some(stamp);
+                }
+            } else {
+                self.status_doc = None;
+                self.status_stamp = None;
+            }
+        }
+        if let Some(doc) = &self.status_doc {
+            return reviews_from_status(doc, repo);
+        }
+
+        // 2. フォールバック: statusline-summary.json
         let path = resolve_review_summary_path(integration);
         let current_stamp = path.as_deref().and_then(FileStamp::of);
 
@@ -164,6 +187,7 @@ impl ReviewSummaryCache {
         RepoReviews {
             active: active.into_iter().cloned().collect(),
             waiting: waiting.into_iter().cloned().collect(),
+            alert: None,
         }
     }
 }
@@ -439,6 +463,7 @@ mod tests {
             enabled: true,
             output_dir: None,
             summary_path: Some(path.to_string_lossy().to_string()),
+            status_path: None,
         };
 
         let mut cache = ReviewSummaryCache::new();
@@ -476,6 +501,7 @@ mod tests {
             enabled: true,
             output_dir: None,
             summary_path: Some(path.to_string_lossy().to_string()),
+            status_path: None,
         };
 
         let mut cache = ReviewSummaryCache::new();
@@ -521,6 +547,44 @@ mod tests {
         let updated = cache.reviews_for(&integration, Some("o/r"));
         assert_eq!(updated.active.len(), 1);
         assert_eq!(updated.active[0].pr_number, 1000);
+    }
+
+    #[test]
+    fn test_review_summary_cache_prefers_status_path_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_path = dir.path().join("review-status.json");
+        let summary_path = dir.path().join("statusline-summary.json");
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        fs::write(
+            &status_path,
+            format!(
+                r#"{{"schemaVersion":1,"updatedAt":"{now_iso}","subscription":{{"state":"running"}},"items":[{{"repository":"o/r","prNumber":77,"round":1,"reason":"opened","state":"waiting","holdReason":"ciPending"}}]}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &summary_path,
+            r#"{"schemaVersion":1,"queue":{"totalWaiting":1,"items":[{"repository":"o/r","prNumber":88,"round":1,"reason":"opened"}]},"activeReviews":[]}"#,
+        )
+        .unwrap();
+
+        let integration = SquirrelNotifierConfig {
+            enabled: true,
+            output_dir: None,
+            summary_path: Some(summary_path.to_string_lossy().to_string()),
+            status_path: Some(status_path.to_string_lossy().to_string()),
+        };
+        let mut cache = ReviewSummaryCache::new();
+        let r1 = cache.reviews_for(&integration, Some("o/r"));
+        assert_eq!(r1.waiting.len(), 1);
+        assert_eq!(r1.waiting[0].pr_number, 77);
+        assert_eq!(r1.waiting[0].hold_reason.as_deref(), Some("ciPending"));
+
+        // review-status.json 削除時は statusline-summary.json へフォールバック
+        fs::remove_file(&status_path).unwrap();
+        let r2 = cache.reviews_for(&integration, Some("o/r"));
+        assert_eq!(r2.waiting.len(), 1);
+        assert_eq!(r2.waiting[0].pr_number, 88);
     }
 
     #[test]

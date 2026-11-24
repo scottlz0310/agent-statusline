@@ -37,9 +37,21 @@ pub enum UiNode {
         props: TextProps,
         children: Vec<UiNode>,
     },
+    Link {
+        props: LinkProps,
+        children: Vec<UiNode>,
+    },
     #[serde(untagged)]
     String(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkProps {
+    pub href: String,
+}
+
+/// Codex `LinkHref` の UTF-8 バイト上限（`statusline.d.ts`: 8 KiB）
+pub const MAX_LINK_HREF_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TextProps {
@@ -122,41 +134,66 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-fn push_merged_entry(entries: &mut Vec<(TextProps, String)>, props: TextProps, text: &str) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntryStyle {
+    props: TextProps,
+    href: Option<String>,
+}
+
+fn sanitize_href(href: Option<&str>) -> Option<String> {
+    let raw = href?.trim();
+    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
+        return None;
+    }
+    if raw.len() > MAX_LINK_HREF_BYTES || raw.chars().any(char::is_control) {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+fn push_merged_entry(entries: &mut Vec<(EntryStyle, String)>, style: EntryStyle, text: &str) {
     if text.is_empty() {
         return;
     }
-    if let Some((last_props, last_text)) = entries.last_mut()
-        && *last_props == props
+    if let Some((last_style, last_text)) = entries.last_mut()
+        && *last_style == style
     {
         last_text.push_str(text);
     } else {
-        entries.push((props, text.to_string()));
+        entries.push((style, text.to_string()));
     }
 }
 
-fn node_cost(props: &TextProps) -> usize {
-    if props.is_default() { 1 } else { 2 }
+fn node_cost(style: &EntryStyle) -> usize {
+    let base = if style.props.is_default() { 1 } else { 2 };
+    base + usize::from(style.href.is_some())
 }
 
-fn entry_to_node(props: TextProps, text: String) -> UiNode {
-    if props.is_default() {
+fn entry_to_node(style: EntryStyle, text: String) -> UiNode {
+    let inner = if style.props.is_default() {
         UiNode::String(text)
     } else {
         UiNode::Text {
-            props,
+            props: style.props,
             children: vec![UiNode::String(text)],
         }
+    };
+    match style.href {
+        Some(href) => UiNode::Link {
+            props: LinkProps { href },
+            children: vec![inner],
+        },
+        None => inner,
     }
 }
 
 /// 行ごとのスタイル付きスパン列を Codex `UiTree` へ変換する。
 ///
-/// 複数行は純粋な `text` + `string` + `"\n"` で構成する（`row` を混在させると
+/// 複数行は純粋な `text` + `link` + `string` + `"\n"` で構成する（`row` を混在させると
 /// Codex の `prepare.rs` により暗黙横並び分割され 2 行目以降が崩れるため）。
 /// 非 null ノード数（256）・リーフ UTF-8 バイト数（16 KiB）・深さ（16）の上限を常に保証する。
 pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
-    let mut entries: Vec<(TextProps, String)> = Vec::new();
+    let mut entries: Vec<(EntryStyle, String)> = Vec::new();
     let mut remaining_bytes = MAX_TEXT_BYTES;
 
     for (line_idx, line) in lines.iter().enumerate() {
@@ -164,7 +201,14 @@ pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
             break;
         }
         if line_idx > 0 {
-            push_merged_entry(&mut entries, TextProps::default(), "\n");
+            push_merged_entry(
+                &mut entries,
+                EntryStyle {
+                    props: TextProps::default(),
+                    href: None,
+                },
+                "\n",
+            );
             remaining_bytes = remaining_bytes.saturating_sub(1);
             if remaining_bytes == 0 {
                 break;
@@ -180,8 +224,11 @@ pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
                 continue;
             }
             remaining_bytes -= clipped.len();
-            let props = text_props_from_ansi_codes(&span.codes);
-            push_merged_entry(&mut entries, props, clipped);
+            let style = EntryStyle {
+                props: text_props_from_ansi_codes(&span.codes),
+                href: sanitize_href(span.href.as_deref()),
+            };
+            push_merged_entry(&mut entries, style, clipped);
         }
     }
 
@@ -189,10 +236,10 @@ pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
         return UiTree(None);
     }
 
-    // 単一エントリのみならラッパーのルート text を省いてそのまま返す（ノード 1〜2 個、深さ 0〜1）
+    // 単一エントリのみならラッパーのルート text を省いてそのまま返す（ノード 1〜3 個、深さ 0〜2）
     if entries.len() == 1 {
-        let (props, text) = entries.pop().unwrap();
-        return UiTree(Some(entry_to_node(props, text)));
+        let (style, text) = entries.pop().unwrap();
+        return UiTree(Some(entry_to_node(style, text)));
     }
 
     // ルート Text (1 ノード) + 各子要素の合計ノード数を MAX_NODES (256) 以内に収める。
@@ -202,17 +249,17 @@ pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
     let mut used_nodes = 1usize; // ルート Text 分
     let mut overflow_plain = String::new();
 
-    for (idx, (props, text)) in entries.into_iter().enumerate() {
+    for (idx, (style, text)) in entries.into_iter().enumerate() {
         if !overflow_plain.is_empty() {
             overflow_plain.push_str(&text);
             continue;
         }
-        let cost = node_cost(&props);
+        let cost = node_cost(&style);
         // この要素をスタイル付きで入れた後、残りの要素があれば最低 1 ノード（畳み込み String）を残す
         let reserve_for_tail = usize::from(idx + 1 < total_entries);
         if used_nodes + cost + reserve_for_tail <= MAX_NODES {
             used_nodes += cost;
-            children.push(entry_to_node(props, text));
+            children.push(entry_to_node(style, text));
         } else {
             overflow_plain.push_str(&text);
         }
@@ -235,7 +282,7 @@ pub fn spans_to_ui_tree(lines: &[Vec<StyledSpan>]) -> UiTree {
 fn flatten_text(node: &UiNode, out: &mut String) {
     match node {
         UiNode::String(s) => out.push_str(s),
-        UiNode::Text { children, .. } => {
+        UiNode::Text { children, .. } | UiNode::Link { children, .. } => {
             for child in children {
                 flatten_text(child, out);
             }
@@ -317,11 +364,27 @@ mod tests {
                     );
                 }
                 Value::Object(map) => {
-                    assert_eq!(map.get("type").and_then(Value::as_str), Some("text"));
+                    let kind = map.get("type").and_then(Value::as_str);
+                    assert!(
+                        matches!(kind, Some("text" | "link")),
+                        "unexpected UiTree element type: {kind:?}"
+                    );
+                    if kind == Some("link") {
+                        let href = map
+                            .get("props")
+                            .and_then(|p| p.get("href"))
+                            .and_then(Value::as_str)
+                            .expect("link node has string props.href");
+                        assert!(
+                            href.starts_with("https://") || href.starts_with("http://"),
+                            "invalid href: {href}"
+                        );
+                        assert!(href.len() <= MAX_LINK_HREF_BYTES);
+                    }
                     let children = map
                         .get("children")
                         .and_then(Value::as_array)
-                        .expect("text node has children array");
+                        .expect("element node has children array");
                     for child in children {
                         if !child.is_null() {
                             stack.push((child, depth + 1));
@@ -455,6 +518,7 @@ mod tests {
                 .map(|i| StyledSpan {
                     text: format!("s{i} "),
                     codes: vec![if i % 2 == 0 { 31 } else { 32 }],
+                    href: None,
                 })
                 .collect();
 
@@ -468,12 +532,69 @@ mod tests {
     }
 
     #[test]
+    fn test_link_nodes_render_and_respect_limits() {
+        use crate::model::review_summary::{ActiveReview, QueuedReview};
+
+        let state = StatuslineState {
+            cwd: PathBuf::from("C:\\Users\\dev\\src\\agent-statusline"),
+            model: Some("GPT-6.2-Sol".to_string()),
+            ..Default::default()
+        };
+        let reviews = RepoReviews {
+            active: vec![ActiveReview {
+                repository: "scottlz0310/agent-statusline".to_string(),
+                pr_number: 149,
+                round: 1,
+                agent: Some("codex".to_string()),
+                started_at: None,
+            }],
+            waiting: vec![QueuedReview {
+                repository: "scottlz0310/agent-statusline".to_string(),
+                pr_number: 150,
+                round: 2,
+                reason: "opened".to_string(),
+                hold_reason: Some("ciPending".to_string()),
+                queue_position: None,
+                auto_pause_used_pct: None,
+            }],
+            alert: None,
+        };
+
+        let tree = render_ui_tree(&Config::default(), &state, None, &reviews);
+        let json = tree.to_json_string();
+        assert_codex_limits(&json);
+        assert!(json.contains("\"type\":\"link\""), "{json}");
+        assert!(
+            json.contains("https://github.com/scottlz0310/agent-statusline/pull/149"),
+            "{json}"
+        );
+        assert!(
+            json.contains("https://github.com/scottlz0310/agent-statusline/pull/150"),
+            "{json}"
+        );
+        assert!(json.contains("(CI)"), "{json}");
+
+        // リンクノード大量投入時も 256 ノード上限を満たすこと
+        let many_links: Vec<StyledSpan> = (0..120)
+            .map(|i| StyledSpan {
+                text: format!("#{i} "),
+                codes: vec![33],
+                href: Some(format!("https://github.com/o/r/pull/{i}")),
+            })
+            .collect();
+        let bounded = spans_to_ui_tree(&[many_links]).to_json_string();
+        assert_codex_limits(&bounded);
+        assert!(bounded.contains("#119"));
+    }
+
+    #[test]
     fn test_text_byte_limit_16kib_is_enforced() {
         // マルチバイト文字（日本語 3 バイト）を含む 20 KiB 入力
         let huge = "あ".repeat(7_000); // 21,000 bytes
         let line = vec![StyledSpan {
             text: huge,
             codes: vec![36],
+            href: None,
         }];
 
         let tree = spans_to_ui_tree(&[line]);
@@ -488,6 +609,7 @@ mod tests {
         let line = vec![StyledSpan {
             text: heavily_escaped,
             codes: vec![1, 31],
+            href: None,
         }];
 
         let tree = spans_to_ui_tree(&[line]);
