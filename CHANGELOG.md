@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-24
+
 ### Added
 
 - `$review` モジュールが Squirrel Notifier の詳細公開契約 `review-status.json`（`schemaVersion: 1`、設定キー `[integrations.squirrel_notifier] status_path`）を優先読み込みするよう拡張（不在・破損時は `statusline-summary.json` へ自動フォールバック）。実行経過時間（`$elapsed`）、待機理由バッジ（`$hold`: `(CI)` / `(busy#N)` / `(pause N%)` / `(manual)`）、および購読異常・3 分鮮度切れ警告（`⚠auth` / `⚠err` / `⚠stopped` / `⚠stale`）を全 4 CLI で表示可能にし、Codex CLI（`agent-statusline mcp codex`）では 1 秒間隔ポーリングと mtime キャッシュでリアルタイム更新する (#149)。
 - Codex CLI の `UiTree` 出力で、`$review` 部品内の PR 番号（`#N`）を GitHub PR へのクリック可能リンク（`link` ノード）として描画するよう対応（ANSI 出力および 4 上限ガードは維持） (#149)。
+
+### Changed
+
+- README の `cargo install` 例を、このリリースの `v0.7.0` に更新。
 
 ## [0.6.0] - 2026-11-22
 
@@ -172,5 +178,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero-downtime self-update design (`agent-statusline update` and background release check).
 - Task management and tracking document (`tasks.md`).
 
-[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/agent-statusline/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/scottlz0310/agent-statusline/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/scottlz0310/agent-statusline/compare/v0.5.0...v0.6.0
