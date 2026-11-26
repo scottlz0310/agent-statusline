@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use gix::sec::Trust;
-use gix::sec::trust::DefaultForLevel;
 
 use super::git_system_config::system_config_path;
 
@@ -61,21 +60,21 @@ pub fn get_git_status(path: &Path, query: GitQuery) -> GitStatus {
 }
 
 fn discover(path: &Path, system_config: Option<&Path>) -> Option<gix::Repository> {
-    let trust_map = gix::sec::trust::Mapping {
-        full: open_options(Trust::Full, system_config),
-        reduced: open_options(Trust::Reduced, system_config),
-    };
     gix::ThreadSafeRepository::discover_opts(
         path,
         gix::discover::upwards::Options::default(),
-        trust_map,
+        |options, level| open_options(options, level, system_config),
     )
     .ok()
     .map(Into::into)
 }
 
 /// 描画のたびに `git.exe` を起動しないよう、システム設定の場所を gix に探させない
-fn open_options(level: Trust, system_config: Option<&Path>) -> gix::open::Options {
+fn open_options(
+    options: gix::open::Options,
+    level: Trust,
+    system_config: Option<&Path>,
+) -> gix::open::Options {
     let mut permissions = gix::open::Permissions::default_for_level(level);
     permissions.config.system &= system_config.is_some();
     // Windows ではシステム gitattributes の場所を調べるためにも `git.exe` が起動する。
@@ -83,7 +82,7 @@ fn open_options(level: Trust, system_config: Option<&Path>) -> gix::open::Option
     if cfg!(windows) {
         permissions.attributes.system = false;
     }
-    let options = gix::open::Options::default_for_level(level).permissions(permissions);
+    let options = options.permissions(permissions);
     match system_config {
         Some(path) => options.system_config_path(path),
         None => options,
@@ -181,6 +180,100 @@ mod tests {
                 },
             );
             assert_eq!(status.remote_repo.as_deref(), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn test_working_tree_encoding_same_size_edit_marks_dirty() {
+        use std::process::Command;
+
+        // (working-tree-encoding, 初期内容バイト列, 同じバイト数の編集後バイト列)
+        let cases: [(&str, &[u8], &[u8]); 3] = [
+            // encoding-asian: Shift_JIS ("あい" -> "あう")
+            (
+                "SHIFT-JIS",
+                &[0x82, 0xA0, 0x82, 0xA2],
+                &[0x82, 0xA0, 0x82, 0xA4],
+            ),
+            // encoding-western: Windows-1252 ("café" -> "cafè")
+            (
+                "WINDOWS-1252",
+                &[0x63, 0x61, 0x66, 0xE9],
+                &[0x63, 0x61, 0x66, 0xE8],
+            ),
+            // encoding-legacy: ISO-8859-2 ("aąbć" -> "aąbę")
+            (
+                "ISO-8859-2",
+                &[0x61, 0xB1, 0x62, 0xE6],
+                &[0x61, 0xB1, 0x62, 0xEA],
+            ),
+        ];
+
+        for (encoding, initial, edited) in cases {
+            assert_eq!(initial.len(), edited.len(), "{encoding}");
+            let dir = tempfile::tempdir().unwrap();
+            let empty_config = dir.path().join("empty-gitconfig");
+            std::fs::write(&empty_config, "").unwrap();
+            let repo_dir = dir.path().join("repo");
+            std::fs::create_dir(&repo_dir).unwrap();
+
+            let run_git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(&repo_dir)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", &empty_config)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{encoding}: git {args:?} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+
+            run_git(&["init", "-q"]);
+            run_git(&["config", "core.autocrlf", "false"]);
+            std::fs::write(
+                repo_dir.join(".gitattributes"),
+                format!("sample.txt working-tree-encoding={encoding}\n"),
+            )
+            .unwrap();
+            let sample = repo_dir.join("sample.txt");
+            std::fs::write(&sample, initial).unwrap();
+            run_git(&["add", ".gitattributes", "sample.txt"]);
+            run_git(&[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ]);
+
+            let query = GitQuery {
+                dirty: true,
+                remote_repo: false,
+            };
+            let clean = get_git_status(&repo_dir, query);
+            assert!(
+                !clean.is_dirty,
+                "{encoding}: committed tree should be clean"
+            );
+
+            // 同じバイト数で内容を書き換え、未ステージ変更が検出されることを確認する
+            std::fs::write(&sample, edited).unwrap();
+            let dirty = get_git_status(&repo_dir, query);
+            assert!(
+                dirty.is_dirty,
+                "{encoding}: same-size unstaged edit should be detected as dirty"
+            );
         }
     }
 

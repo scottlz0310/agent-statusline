@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `gix` crate を `0.90.0` から `0.91.0` に更新し、`gix::ThreadSafeRepository::discover_opts` のコールバック API へ追従（削除された `gix::sec::trust::Mapping` / `DefaultForLevel` の利用を置換）。あわせて `working-tree-encoding` 用の `encoding-legacy` / `encoding-asian` feature を有効化し、Shift_JIS や Windows-1252 等の従来対応文字コードの互換性を維持。
+
 ## [0.7.0] - 2026-11-24
 
 ### Added
