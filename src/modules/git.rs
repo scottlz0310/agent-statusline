@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use gix::sec::Trust;
-use gix::sec::trust::DefaultForLevel;
 
 use super::git_system_config::system_config_path;
 
@@ -61,21 +60,21 @@ pub fn get_git_status(path: &Path, query: GitQuery) -> GitStatus {
 }
 
 fn discover(path: &Path, system_config: Option<&Path>) -> Option<gix::Repository> {
-    let trust_map = gix::sec::trust::Mapping {
-        full: open_options(Trust::Full, system_config),
-        reduced: open_options(Trust::Reduced, system_config),
-    };
     gix::ThreadSafeRepository::discover_opts(
         path,
         gix::discover::upwards::Options::default(),
-        trust_map,
+        |options, level| open_options(options, level, system_config),
     )
     .ok()
     .map(Into::into)
 }
 
 /// 描画のたびに `git.exe` を起動しないよう、システム設定の場所を gix に探させない
-fn open_options(level: Trust, system_config: Option<&Path>) -> gix::open::Options {
+fn open_options(
+    options: gix::open::Options,
+    level: Trust,
+    system_config: Option<&Path>,
+) -> gix::open::Options {
     let mut permissions = gix::open::Permissions::default_for_level(level);
     permissions.config.system &= system_config.is_some();
     // Windows ではシステム gitattributes の場所を調べるためにも `git.exe` が起動する。
@@ -83,7 +82,7 @@ fn open_options(level: Trust, system_config: Option<&Path>) -> gix::open::Option
     if cfg!(windows) {
         permissions.attributes.system = false;
     }
-    let options = gix::open::Options::default_for_level(level).permissions(permissions);
+    let options = options.permissions(permissions);
     match system_config {
         Some(path) => options.system_config_path(path),
         None => options,
